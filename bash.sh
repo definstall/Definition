@@ -13,6 +13,7 @@ echo
 urls=(
    #  "https://git.io/hysteria.sh hysteria脚本"
     "https://git.io/oneclick  trojan_v2ray脚本"
+    "https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh IP质量检测脚本"
     "https://raw.githubusercontent.com/localpoliy/install/local/bbr.sh BBR_脚本"
     "https://raw.githubusercontent.com/yonggekkk/sing-box-yg/main/sb.sh 一键四协议"
     "https://raw.githubusercontent.com/localpoliy/install/local/nginx.sh Nginx_脚本"
