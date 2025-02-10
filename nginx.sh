@@ -212,9 +212,10 @@ function addDomainPort() {
     echo -e "    # 设置 keep-alive 超时时间" >> "$nginx_domain_conf_path"
     echo -e "    keepalive_timeout 65s;  # 可以根据需求调整，例如 60s、120s 等" >> "$nginx_domain_conf_path"
     echo -e "    keepalive_requests 100;  # 每个连接最多允许 100 个请求" >> "$nginx_domain_conf_path"
-
-    echo -e "    # 可选: 设置连接的最大保持数量" >> "$nginx_domain_conf_path"
     echo -e "    }" >> "$nginx_domain_conf_path"
+    echo -e "    # 可选: 设置连接的最大保持数量" >> "$nginx_domain_conf_path"
+    echo -e "    keepalive_requests 100;  # 每个连接最多允许 100 个请求" >> "$nginx_domain_conf_path"
+    
     # 防止爬虫抓取 防止爬虫抓取可能会对网站的SEO产生一定的影响，具体取决于你选择的实现方式和执行策略
     echo -e " if (\$http_user_agent ~* \"360Spider|JikeSpider|Spider|spider|bot|Bot|2345Explorer|curl|wget|webZIP|qihoobot|Baiduspider|Googlebot|Googlebot-Mobile|Googlebot-Image|Mediapartners-Google|Adsbot-Google|Feedfetcher-Google|Yahoo! Slurp|Yahoo! Slurp China|YoudaoBot|Sosospider|Sogou spider|Sogou web spider|MSNBot|ia_archiver|Tomato Bot|NSPlayer|bingbot\") {" >> "$nginx_domain_conf_path"
     echo -e "      return 403;" >> "$nginx_domain_conf_path"
