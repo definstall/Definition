@@ -200,7 +200,6 @@ function addDomainPort() {
     echo -e "\nserver {" >> "$nginx_domain_conf_path"
     echo -e "  listen 80;" >> "$nginx_domain_conf_path"
     echo -e "  server_name $domain;" >> "$nginx_domain_conf_path"
-    echo -e "\n" >> "$nginx_domain_conf_path"
     echo -e "  client_body_timeout 120s; # 设置客户端请求超时时间" >> "$nginx_domain_conf_path"
     echo -e "  send_timeout 120s; # 设置 keep-alive 超时时间" >> "$nginx_domain_conf_path"
     echo -e "  keepalive_timeout 65s;  # 可以根据需求调整，例如 60s、120s 等" >> "$nginx_domain_conf_path"
@@ -249,7 +248,7 @@ function deleteDomainPort() {
         if [[ -n "$line_number" ]]; then
             # 获取开始和结束行的行号（这里假设删除指定域名的上2行和下8行）
             start=$((line_number - 2))  # 删除之前的两行（如 listen 和 server_name）
-            end=$((line_number + 20))    # 删除之后的 20 行（包括可能的 location 配置）
+            end=$((line_number + 10))    # 删除之后的 20 行（包括可能的 location 配置）
 
             # 使用 awk 删除指定范围的行
             awk -v start="$start" -v end="$end" 'NR < start || NR > end' "$nginx_domain_conf_path" > temp_config && mv temp_config "$nginx_domain_conf_path"
