@@ -249,7 +249,7 @@ function deleteDomainPort() {
         if [[ -n "$line_number" ]]; then
             # 获取开始和结束行的行号（这里假设删除指定域名的上2行和下8行）
             start=$((line_number - 2))  # 删除之前的两行（如 listen 和 server_name）
-            end=$((line_number + 12))    # 删除之后的 8 行（包括可能的 location 配置）
+            end=$((line_number + 20))    # 删除之后的 8 行（包括可能的 location 配置）
 
             # 使用 awk 删除指定范围的行
             awk -v start="$start" -v end="$end" 'NR < start || NR > end' "$nginx_domain_conf_path" > temp_config && mv temp_config "$nginx_domain_conf_path"
