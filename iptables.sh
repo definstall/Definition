@@ -10,6 +10,8 @@
 #   - [BUG 修复] 彻底修复了端口删除功能。通过重构删除逻辑，使用 `eval` 和
 #     `iptables-save` 的输出直接构造删除命令，解决了因 shell 单词分割
 #     (word splitting) 导致的参数解析错误问题。
+#   - [语法修复] 补全了被截断的 `delete_forwarding_rule` 函数，解决了脚本
+#     意外结束 (EOF) 的语法错误。
 #
 # --- v3.1 更新日志 ---
 #   - [核心优化] 自动化规则保存：所有规则变更后都会自动持久化。
@@ -175,23 +177,20 @@ function view_port_rules() {
     press_enter_to_continue
 }
 
-# [已修复] 内部辅助函数：删除指定链中某个端口的所有规则
 function _delete_rules_for_port_in_chain() {
-    local port="\$1"
-    local proto="\$2"
-    local chain="\$3"
-    local mode="\$4"
+    local port="$1"
+    local proto="$2"
+    local chain="$3"
+    local mode="$4"
     local all_deleted=true
 
     iptables-save | grep -- "-A ${chain}" | grep -- "-p ${proto}" | grep -- "--dport ${port}" | grep -- "-m comment --comment \"${COMMENT_TAG}\"" | while read -r rule; do
-        # 【核心修复】直接将 -A 替换为 -D 来构造删除命令
         local delete_command="iptables ${rule/-A/-D}"
         
         if [[ "$mode" != "silent" ]]; then
             print_info "将执行删除命令: ${delete_command}"
         fi
 
-        # 使用 eval 来执行构造好的命令字符串，确保所有参数（特别是带引号的注释）被正确解析
         if ! eval "${delete_command}"; then
             all_deleted=false
             if [[ "$mode" != "silent" ]]; then
@@ -300,4 +299,140 @@ function delete_forwarding_rule() {
     
     while IFS= read -r rule; do
         if [[ $rule =~ ${COMMENT_TAG}:fwd:([0-9]+):to:([^:]+):([0-9]+) ]]; then
-            local from_port=${BASH
+            local from_port=${BASH_REMATCH[1]}
+            local to_ip=${BASH_REMATCH[2]}
+            local to_port=${BASH_REMATCH[3]}
+            rules+=("转发: ${from_port} -> ${to_ip}:${to_port}")
+            rule_details+=("${from_port}|${to_ip}|${to_port}")
+        fi
+    done < <(iptables-save -t nat | grep -- "-A PREROUTING" | grep "${COMMENT_TAG}")
+
+    if [ ${#rules[@]} -eq 0 ]; then
+        print_warn "没有找到由本脚本管理的任何转发规则。"
+        press_enter_to_continue
+        return
+    fi
+
+    rules+=("返回")
+    print_info "请选择要删除的转发规则:"
+    select choice in "${rules[@]}"; do
+        if [[ "$choice" == "返回" ]]; then break; fi
+        if [ -n "$choice" ]; then
+            local details=${rule_details[$((REPLY-1))]}
+            IFS='|' read -r from_port to_ip to_port <<< "$details"
+            
+            print_warn "将要删除转发规则: ${from_port} -> ${to_ip}:${to_port}"
+            read -p "确认删除吗? (y/N): " confirm
+            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                local all_deleted=true
+                local rule_comment="${COMMENT_TAG}:fwd:${from_port}:to:${to_ip}:${to_port}"
+                
+                local prerouting_spec="-p tcp --dport ${from_port} -m comment --comment \"${rule_comment}\" -j DNAT --to-destination ${to_ip}:${to_port}"
+                print_info "正在删除 PREROUTING 规则..."
+                if ! iptables -t nat -D PREROUTING ${prerouting_spec}; then
+                    all_deleted=false
+                    print_error "删除 PREROUTING 规则失败。"
+                fi
+
+                local output_spec="-p tcp --dport ${from_port} -d 127.0.0.1 -m comment --comment \"${rule_comment}\" -j DNAT --to-destination ${to_ip}:${to_port}"
+                print_info "正在删除 OUTPUT 规则..."
+                if ! iptables -t nat -D OUTPUT ${output_spec}; then
+                    all_deleted=false
+                    print_error "删除 OUTPUT 规则失败。"
+                fi
+
+                if $all_deleted; then
+                    print_success "转发规则已成功删除。"
+                    save_rules
+                else
+                    print_error "删除过程中发生错误，请检查。"; fi
+            else
+                print_info "操作已取消。"; fi
+        else
+            print_error "无效选项。"; fi
+        break
+    done
+    press_enter_to_continue
+}
+
+# 4. 实时流量监控
+function view_traffic() {
+    print_info "正在启动实时流量监控... (按 Ctrl+C 退出)"
+    sleep 1
+    if [ "$IS_DOCKER_HOST" = true ]; then
+        watch -n 2 "echo '--- 主机 INPUT 链 (受管) ---'; iptables -nvL INPUT; echo -e '\n--- Docker DOCKER-USER 链 (受管) ---'; iptables -nvL DOCKER-USER; echo -e '\n--- Docker FORWARD 链 (Docker 自动管理) ---'; iptables -nvL FORWARD"
+    else
+        watch -n 2 "iptables -nvL"
+    fi
+}
+
+# 5. 卸载功能
+function uninstall_firewall() {
+    clear
+    print_warn "!!! 极度危险操作 !!!"
+    print_warn "此操作将执行以下动作:"
+    print_warn "1. 清空所有 iptables 规则。"
+    print_warn "2. 将默认策略设置为全部允许 (ACCEPT)，服务器将完全暴露在公网。"
+    print_warn "3. 删除已保存的规则文件 /etc/iptables/rules.v4。"
+    print_warn "4. 卸载 iptables-persistent 包。"
+    echo ""
+    read -p "要继续，请输入 'YES' (大小写敏感): " confirm1
+    if [ "$confirm1" != "YES" ]; then print_info "操作已取消。"; press_enter_to_continue; return; fi
+    read -p "请再次输入 'DELETE MY FIREWALL' 以最终确认: " confirm2
+    if [ "$confirm2" != "DELETE MY FIREWALL" ]; then print_info "操作已取消。"; press_enter_to_continue; return; fi
+    print_info "正在执行卸载和重置..."
+    iptables -F; iptables -X; iptables -Z
+    iptables -t nat -F; iptables -t nat -X; iptables -t nat -Z
+    iptables -t mangle -F; iptables -t mangle -X; iptables -t mangle -Z
+    iptables -P INPUT ACCEPT; iptables -P FORWARD ACCEPT; iptables -P OUTPUT ACCEPT
+    print_success "所有规则已清空，默认策略已设为 ACCEPT。"
+    rm -f /etc/iptables/rules.v4
+    print_success "规则文件 /etc/iptables/rules.v4 已删除。"
+    apt-get purge -y iptables-persistent > /dev/null
+    print_success "iptables-persistent 已卸载。"
+    echo ""; print_warn "防火墙已完全禁用和移除。您的服务器现在不受保护！"
+    press_enter_to_continue
+}
+
+# --- 主菜单 ---
+function main_menu() {
+    if [ ! -f "/etc/iptables/rules.v4" ]; then
+        initialize_firewall
+    else
+        if command -v docker &> /dev/null; then IS_DOCKER_HOST=true; else IS_DOCKER_HOST=false; fi
+    fi
+
+    while true; do
+        clear
+        local docker_status_text="${C_RED}未安装${C_RESET}"
+        if [ "$IS_DOCKER_HOST" = true ]; then docker_status_text="${C_GREEN}已安装 (深度集成模式)${C_RESET}"; fi
+        
+        echo -e "${C_CYAN}=====================================================${C_RESET}"
+        echo -e "${C_CYAN}  iptables 智能管理脚本 v3.2 (Docker 集成 & 自动保存)  ${C_RESET}"
+        echo -e "${C_CYAN}=====================================================${C_RESET}"
+        echo -e " Docker 状态: ${docker_status_text}"
+        print_info "所有规则变更后将自动保存，无需手动操作。"
+        echo "-----------------------------------------------------"
+        echo -e "1. 端口管理 (添加/查看/删除)"
+        echo -e "2. 端口转发(NAT)管理 (添加/查看/删除)"
+        echo -e "3. 实时查看网络流量和规则计数"
+        echo -e "4. [危险] 重新运行初始化并应用基础安全配置"
+        echo -e "5. ${C_RED}[极度危险] 卸载并重置防火墙${C_RESET}"
+        echo -e "q. 退出"
+        echo "-----------------------------------------------------"
+        read -p "请输入您的选择: " choice
+
+        case $choice in
+            1) manage_ports ;;
+            2) manage_forwarding ;;
+            3) view_traffic ;;
+            4) initialize_firewall; press_enter_to_continue ;;
+            5) uninstall_firewall ;;
+            q|Q) print_info "正在退出。"; exit 0 ;;
+            *) print_error "无效选项，请重试。"; sleep 1 ;;
+        esac
+    done
+}
+
+# --- 脚本入口 ---
+main_menu
