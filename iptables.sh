@@ -1,21 +1,19 @@
 #!/bin/bash
 
 # ==============================================================================
-# iptables 智能管理脚本 v3.2 (深度 Docker 集成 & 自动保存)
+# iptables 智能管理脚本 v3.3 (深度 Docker 集成 & 自动保存)
 # 作者: 你的高级软件工程师
-# 版本: 3.2
+# 版本: 3.3
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v3.2 更新日志 ---
-#   - [BUG 修复] 彻底修复了端口删除功能。通过重构删除逻辑，使用 `eval` 和
-#     `iptables-save` 的输出直接构造删除命令，解决了因 shell 单词分割
-#     (word splitting) 导致的参数解析错误问题。
-#   - [语法修复] 补全了被截断的 `delete_forwarding_rule` 函数，解决了脚本
-#     意外结束 (EOF) 的语法错误。
+# --- v3.3 更新日志 ---
+#   - [BUG 修复] 彻底修复了删除功能。通过统一列表和删除操作中的 `grep` 逻辑，
+#     确保删除函数能正确匹配到所有由脚本管理的规则（包括默认规则和手动添加的规则）。
 #
-# --- v3.1 更新日志 ---
-#   - [核心优化] 自动化规则保存：所有规则变更后都会自动持久化。
-#   - [重大升级] 实现了完整的端口转发规则删除功能。
+# --- v3.2 更新日志 ---
+#   - [BUG 修复] 使用 `eval` 和 `iptables-save` 的输出直接构造删除命令，
+#     解决了因 shell 单词分割导致的参数解析错误问题。
+#   - [语法修复] 补全了被截断的函数，解决了脚本意外结束 (EOF) 的语法错误。
 # ==============================================================================
 
 # --- 颜色定义 ---
@@ -184,7 +182,8 @@ function _delete_rules_for_port_in_chain() {
     local mode="$4"
     local all_deleted=true
 
-    iptables-save | grep -- "-A ${chain}" | grep -- "-p ${proto}" | grep -- "--dport ${port}" | grep -- "-m comment --comment \"${COMMENT_TAG}\"" | while read -r rule; do
+    # 【核心修复】将过于严格的 grep 模式修正为通用的 TAG 匹配
+    iptables-save | grep -- "-A ${chain}" | grep -- "-p ${proto}" | grep -- "--dport ${port}" | grep -- "${COMMENT_TAG}" | while read -r rule; do
         local delete_command="iptables ${rule/-A/-D}"
         
         if [[ "$mode" != "silent" ]]; then
@@ -408,7 +407,7 @@ function main_menu() {
         if [ "$IS_DOCKER_HOST" = true ]; then docker_status_text="${C_GREEN}已安装 (深度集成模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  iptables 智能管理脚本 v3.2 (Docker 集成 & 自动保存)  ${C_RESET}"
+        echo -e "${C_CYAN}  iptables 智能管理脚本 v3.3 (Docker 集成 & 自动保存)  ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " Docker 状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
