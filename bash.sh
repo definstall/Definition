@@ -20,6 +20,7 @@ urls=(
     "https://raw.githubusercontent.com/definstall/Definition/local/xrdps.sh Kubuntu桌面"
   #  "https://raw.githubusercontent.com/localpoliy/install/local/firewall.sh 防火墙脚本"
     "https://raw.githubusercontent.com/definstall/Definition/local/ssh.sh SSH脚本"
+    "https://raw.githubusercontent.com/definstall/Definition/local/fail2ban.sh fail2ban脚本"
     "https://raw.githubusercontent.com/definstall/Definition/local/docker.sh Docker_脚本"
     "https://raw.githubusercontent.com/eooce/ssh_tool/main/ssh_tool.sh -o ssh_tool.sh Tools脚本"
     "https://raw.githubusercontent.com/localpoliy/install/local/wordpress_redis.sh WordPress_Redis_脚本"
