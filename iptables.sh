@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # ==============================================================================
-# iptables 智能管理脚本 v2.6 (Docker 感知)
+# iptables 智能管理脚本 v2.7 (Docker 兼容)
 # 作者: 你的高级软件工程师
-# 版本: 2.6
+# 版本: 2.7
 # 兼容性: Ubuntu 20.04+
 # 功能:
-#   - [改进] 删除端口规则的交互方式，更简单直观。
-#   - [修复] 修复了主菜单颜色代码显示问题。
+#   - [核心变更] 脚本不再管理 DOCKER-USER 链，仅负责主机 INPUT 链的防火墙规则。
+#   - [兼容性] 初始化时会检测 Docker，并避免修改 FORWARD 链，防止破坏 Docker 网络。
+#   - [信息明确] 清晰告知用户脚本的管理范围和 Docker 端口的独立性。
 #   - 自动处理 UFW 与 iptables 的冲突
-#   - Docker 感知，自动应用规则到 DOCKER-USER 链
 #   - 交互式端口管理 (开放/限制/查看/删除)
 #   - 交互式端口转发 (NAT) 管理
 #   - 内置安全加固 (防扫描, 防SYN Flood)
@@ -28,13 +28,11 @@ print_warn() { echo -e "${C_YELLOW}[警告] $1${C_RESET}"; }
 press_enter_to_continue() { echo ""; read -p "按 [Enter] 键返回..."; }
 
 # --- 全局变量 ---
-DOCKER_EXISTS=false
-INPUT_CHAIN="INPUT" 
 COMMENT_TAG="managed-by-script"
 
 # --- 核心功能函数 ---
 
-# 1. 初始化与环境检测 (与上一版相同)
+# 1. 初始化与环境检测
 function initialize_firewall() {
     print_info "开始初始化防火墙配置..."
     if [[ $EUID -ne 0 ]]; then print_error "此脚本必须以 root 权限运行。"; exit 1; fi
@@ -57,38 +55,46 @@ function initialize_firewall() {
         print_success "iptables-persistent 安装完成。"
     fi
     systemctl enable netfilter-persistent.service &>/dev/null
-    if command -v docker &> /dev/null; then
-        DOCKER_EXISTS=true; INPUT_CHAIN="DOCKER-USER"
-        print_success "检测到 Docker 已安装，所有入站规则将应用到 '${INPUT_CHAIN}' 链。"
-    else
-        DOCKER_EXISTS=false; INPUT_CHAIN="INPUT"
-        print_warn "未检测到 Docker，所有入站规则将应用到 'INPUT' 链。"
-    fi
-    print_info "正在应用基础安全规则集..."
-    iptables -F INPUT; iptables -F FORWARD; iptables -F OUTPUT
-    iptables -P INPUT DROP; iptables -P FORWARD DROP; iptables -P OUTPUT ACCEPT
+
+    print_info "正在应用基础规则集..."
+    # 清空现有规则
+    iptables -F INPUT; iptables -F OUTPUT
+    # 设置默认策略
+    iptables -P INPUT DROP
+    iptables -P OUTPUT ACCEPT
+    # 允许本地回环和已建立的连接
     iptables -A INPUT -i lo -j ACCEPT
     iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    print_info "正在添加安全加固规则..."
+
+    # [重要] Docker 兼容性处理
+    if command -v docker &> /dev/null; then
+        print_warn "检测到 Docker！为了不破坏容器网络，本脚本不会修改 'FORWARD' 链的规则和策略。"
+        print_info "所有规则将只应用于主机的 'INPUT' 链。"
+    else
+        print_info "未检测到 Docker，将设置 'FORWARD' 链默认策略为 DROP。"
+        iptables -F FORWARD
+        iptables -P FORWARD DROP
+    fi
+
+    print_info "正在添加安全加固规则到 INPUT 链..."
     iptables -A INPUT -p tcp --tcp-flags ALL FIN,URG,PSH -j DROP
     iptables -A INPUT -p tcp --tcp-flags ALL ALL -j DROP
     iptables -A INPUT -p tcp --tcp-flags ALL NONE -j DROP
     iptables -A INPUT -p tcp --syn -m limit --limit 1/s --limit-burst 3 -j ACCEPT
     iptables -A INPUT -p tcp --syn -j DROP
-    print_info "正在开放默认端口 22/tcp (SSH) 和 2525/tcp..."
-    iptables -A ${INPUT_CHAIN} -p tcp --dport 22 -m comment --comment "${COMMENT_TAG}:default:ssh" -j ACCEPT
-    iptables -A ${INPUT_CHAIN} -p tcp --dport 2525 -m comment --comment "${COMMENT_TAG}:default:2525" -j ACCEPT
+
+    print_info "正在开放默认端口 22/tcp (SSH) 和 2525/tcp 到 INPUT 链..."
+    iptables -A INPUT -p tcp --dport 22 -m comment --comment "${COMMENT_TAG}:default:ssh" -j ACCEPT
+    iptables -A INPUT -p tcp --dport 2525 -m comment --comment "${COMMENT_TAG}:default:2525" -j ACCEPT
+    
     save_rules
     print_success "防火墙初始化完成并已保存规则。"
     sleep 2
 }
 
-# 保存规则 (与上一版相同)
+# 保存规则
 function save_rules() {
     print_info "正在持久化保存所有 iptables 规则..."
-    if [ "$DOCKER_EXISTS" = true ]; then
-        print_info "包含 DOCKER-USER 链在内的所有规则都将被保存。"
-    fi
     if netfilter-persistent save > /dev/null; then
         print_success "规则已成功保存到 /etc/iptables/rules.v4"
     else
@@ -99,7 +105,7 @@ function save_rules() {
 # 2. 端口管理
 function manage_ports() {
     while true; do
-        clear; echo -e "${C_CYAN}--- 端口开放管理 (规则应用到: ${INPUT_CHAIN}) ---${C_RESET}"
+        clear; echo -e "${C_CYAN}--- 主机端口开放管理 (规则应用到: INPUT 链) ---${C_RESET}"
         echo "1. 添加新端口规则"
         echo "2. 查看已添加的端口规则"
         echo "3. 删除端口规则"
@@ -115,21 +121,21 @@ function manage_ports() {
     done
 }
 
-# 添加端口规则 (与上一版相同)
+# 添加端口规则
 function add_port_rule() {
     read -p "请输入要开放的端口号: " port
     read -p "请输入协议 (tcp/udp) [默认: tcp]: " proto
     proto=${proto:-tcp}
     read -p "是否要限制来源IP? (留空则允许所有IP, 或输入IP地址如 8.8.8.8): " source_ip
-    local existing_rules=$(iptables -S ${INPUT_CHAIN} | grep "\-\-dport ${port} " | grep "\-p ${proto} ")
+    local existing_rules=$(iptables -S INPUT | grep "\-\-dport ${port} " | grep "\-p ${proto} ")
     if [ -n "$existing_rules" ]; then
         print_warn "检测到端口 ${port}/${proto} 已有规则，将先删除旧规则再添加新规则。"
-        iptables -S ${INPUT_CHAIN} | grep "\-\-dport ${port} " | grep "\-p ${proto} " | tac | while read -r rule; do
-            iptables -D ${INPUT_CHAIN} ${rule#"-A ${INPUT_CHAIN} "}
+        iptables -S INPUT | grep "\-\-dport ${port} " | grep "\-p ${proto} " | tac | while read -r rule; do
+            iptables -D INPUT ${rule#"-A INPUT "}
         done
     fi
     local rule_comment="${COMMENT_TAG}:port:${port}:${proto}"
-    local cmd="iptables -A ${INPUT_CHAIN} -p ${proto} --dport ${port}"
+    local cmd="iptables -A INPUT -p ${proto} --dport ${port}"
     if [ -n "$source_ip" ]; then
         cmd+=" -s ${source_ip}"
         rule_comment+=":from:${source_ip}"
@@ -140,61 +146,51 @@ function add_port_rule() {
     press_enter_to_continue
 }
 
-# 查看端口规则 (与上一版相同)
+# 查看端口规则
 function view_port_rules() {
-    print_info "--- 当前由脚本管理的端口规则 (${INPUT_CHAIN} 链) ---"
-    iptables -L ${INPUT_CHAIN} -n --line-numbers | grep "${COMMENT_TAG}"
+    print_info "--- 当前由脚本管理的端口规则 (INPUT 链) ---"
+    iptables -L INPUT -n --line-numbers | grep "${COMMENT_TAG}"
     press_enter_to_continue
 }
 
-# [重大改进] 删除端口规则
+# 删除端口规则
 function delete_port_rule() {
     print_info "--- 删除端口规则 (将删除指定端口的所有相关规则) ---"
-    
-    # 智能提取所有被管理的端口号，并去重
-    local ports=($(iptables -S ${INPUT_CHAIN} | grep "${COMMENT_TAG}" | grep -oP '(?<=--dport )\d+' | sort -u))
-    
+    local ports=($(iptables -S INPUT | grep "${COMMENT_TAG}" | grep -oP '(?<=--dport )\d+' | sort -u))
     if [ ${#ports[@]} -eq 0 ]; then
         print_warn "没有找到由本脚本管理的端口规则。"
         press_enter_to_continue
         return
     fi
-
     print_info "请选择要删除规则的端口号:"
     ports+=("返回")
     select port_to_delete in "${ports[@]}"; do
         if [[ "$port_to_delete" == "返回" ]]; then break; fi
         if [ -n "$port_to_delete" ]; then
-            print_warn "将要删除端口 ${port_to_delete} 的所有相关规则 (TCP/UDP, 所有IP限制)。"
+            print_warn "将要删除端口 ${port_to_delete} 在 INPUT 链中的所有相关规则。"
             read -p "确认删除吗? (y/N): " confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 local all_deleted=true
-                # 查找并逆序删除所有与该端口相关的规则
-                iptables -S ${INPUT_CHAIN} | grep "\-\-dport ${port_to_delete} " | grep "${COMMENT_TAG}" | tac | while read -r rule; do
-                    print_info "正在删除: ${rule#"-A ${INPUT_CHAIN} "}"
-                    if ! iptables -D ${INPUT_CHAIN} ${rule#"-A ${INPUT_CHAIN} "}; then
+                iptables -S INPUT | grep "\-\-dport ${port_to_delete} " | grep "${COMMENT_TAG}" | tac | while read -r rule; do
+                    print_info "正在删除: ${rule#"-A INPUT "}"
+                    if ! iptables -D INPUT ${rule#"-A INPUT "}; then
                         all_deleted=false
                     fi
                 done
-
                 if $all_deleted; then
-                    print_success "端口 ${port_to_delete} 的所有规则已成功删除。"
-                    save_rules
+                    print_success "端口 ${port_to_delete} 的所有规则已成功删除。"; save_rules
                 else
-                    print_error "删除过程中发生错误，请检查。"
-                fi
+                    print_error "删除过程中发生错误，请检查。"; fi
             else
-                print_info "操作已取消。"
-            fi
+                print_info "操作已取消。"; fi
         else
-            print_error "无效选项。"
-        fi
+            print_error "无效选项。"; fi
         break
     done
     press_enter_to_continue
 }
 
-# 3. 端口转发 (NAT) (与上一版相同)
+# 3. 端口转发 (NAT) (无变化)
 function manage_forwarding() {
     while true; do
         clear; echo -e "${C_CYAN}--- 端口转发 (NAT) 管理 ---${C_RESET}"
@@ -238,14 +234,18 @@ function delete_forwarding_rule() {
     print_error "删除转发规则功能较复杂，请手动执行 'iptables -t nat -D CHAIN RULE_NUMBER'。"; print_warn "您可以使用 '查看已添加的转发规则' 功能获取链(CHAIN)和规则编号(RULE_NUMBER)。"; press_enter_to_continue
 }
 
-# 4. 实时流量监控 (与上一版相同)
+# 4. 实时流量监控
 function view_traffic() {
     print_info "正在启动实时流量监控... (按 Ctrl+C 退出)"
     sleep 1
-    watch -n 2 "iptables -nvL && [ \"${DOCKER_EXISTS}\" = true ] && echo -e \"\n--- Docker 链 ---\" && iptables -nvL DOCKER-USER"
+    if command -v docker &> /dev/null; then
+        watch -n 2 "echo '--- 主机 INPUT 链 ---'; iptables -nvL INPUT; echo -e '\n--- Docker FORWARD 规则 (由 Docker 管理) ---'; iptables -nvL FORWARD; iptables -nvL DOCKER-USER"
+    else
+        watch -n 2 "iptables -nvL"
+    fi
 }
 
-# 卸载功能 (与上一版相同)
+# 卸载功能 (无变化)
 function uninstall_firewall() {
     clear
     print_warn "!!! 极度危险操作 !!!"
@@ -278,16 +278,19 @@ function main_menu() {
     if [ ! -f "/etc/iptables/rules.v4" ]; then
         initialize_firewall
     fi
-    if command -v docker &> /dev/null; then DOCKER_EXISTS=true; INPUT_CHAIN="DOCKER-USER"; else DOCKER_EXISTS=false; INPUT_CHAIN="INPUT"; fi
 
     while true; do
         clear
+        local docker_status="未安装"
+        if command -v docker &> /dev/null; then docker_status="${C_GREEN}已安装${C_RESET}"; fi
+        
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}      iptables 智能管理脚本 v2.6 (Docker 感知)       ${C_RESET}"
+        echo -e "${C_CYAN}      iptables 智能管理脚本 v2.7 (Docker 兼容)       ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e " Docker 状态: ${DOCKER_EXISTS} | 当前规则目标链: ${C_YELLOW}${INPUT_CHAIN}${C_RESET}"
+        echo -e " 管理目标: ${C_YELLOW}主机 INPUT 链${C_RESET} | Docker 状态: ${docker_status}"
+        print_warn "注意: 本脚本不管理 Docker 容器端口。Docker 端口由 Docker 自动管理。"
         echo "-----------------------------------------------------"
-        echo -e "1. 端口开放管理 (添加/查看/删除)"
+        echo -e "1. 主机端口管理 (添加/查看/删除)"
         echo -e "2. 端口转发(NAT)管理 (添加/查看/删除)"
         echo -e "3. 实时查看网络流量和规则计数"
         echo -e "4. 手动保存当前所有规则"
