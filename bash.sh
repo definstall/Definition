@@ -24,7 +24,7 @@ urls=(
     "https://raw.githubusercontent.com/definstall/Definition/local/xrdps.sh Kubuntu桌面"
     "https://raw.githubusercontent.com/definstall/Definition/local/docker.sh Docker_脚本"
     "https://raw.githubusercontent.com/definstall/ssh_tool/main/ssh_tool.sh -o ssh_tool.sh Tools脚本"
-    "https://raw.githubusercontent.com/localpoliy/install/local/wordpress_redis.sh WordPress_Redis_脚本"
+    "https://raw.githubusercontent.com/localpoliy/install/local/wordpress_redis.sh docker_WordPress_Redis_脚本"
     "退出脚本"
 )
 
