@@ -21,7 +21,7 @@ urls=(
     "https://raw.githubusercontent.com/definstall/Definition/local/iptables.sh IPtables防火墙脚本"
     "https://raw.githubusercontent.com/definstall/Definition/local/fail2ban.sh Fail2ban脚本"
     "https://raw.githubusercontent.com/definstall/Definition/local/docker.sh Docker_脚本"
-    "https://raw.githubusercontent.com/eooce/ssh_tool/main/ssh_tool.sh -o ssh_tool.sh Tools脚本"
+    "https://raw.githubusercontent.com/definstall/ssh_tool/main/ssh_tool.sh -o ssh_tool.sh Tools脚本"
     "https://raw.githubusercontent.com/localpoliy/install/local/wordpress_redis.sh WordPress_Redis_脚本"
     "退出脚本"
 )
