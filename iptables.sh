@@ -1,19 +1,19 @@
 #!/bin/bash
 
 # ==============================================================================
-# iptables 智能管理脚本 v3.3 (深度 Docker 集成 & 自动保存)
+# iptables 智能管理脚本 v3.4 (深度 Docker 集成 & 自动保存)
 # 作者: 你的高级软件工程师
-# 版本: 3.3
+# 版本: 3.4
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v3.3 更新日志 ---
-#   - [BUG 修复] 彻底修复了删除功能。通过统一列表和删除操作中的 `grep` 逻辑，
-#     确保删除函数能正确匹配到所有由脚本管理的规则（包括默认规则和手动添加的规则）。
+# --- v3.4 更新日志 ---
+#   - [BUG 修复] 彻底修复了端口转发(NAT)的删除功能。重构了其删除逻辑，
+#     采用与端口删除相同的健壮模式：使用规则的 comment 作为唯一标识，
+#     从 `iptables-save` 获取精确规则并用 `eval` 执行删除，解决了参数解析错误。
 #
-# --- v3.2 更新日志 ---
-#   - [BUG 修复] 使用 `eval` 和 `iptables-save` 的输出直接构造删除命令，
-#     解决了因 shell 单词分割导致的参数解析错误问题。
-#   - [语法修复] 补全了被截断的函数，解决了脚本意外结束 (EOF) 的语法错误。
+# --- v3.3 更新日志 ---
+#   - [BUG 修复] 统一了列表和删除操作中的 `grep` 逻辑，确保删除函数能正确匹配
+#     到所有由脚本管理的规则。
 # ==============================================================================
 
 # --- 颜色定义 ---
@@ -182,7 +182,6 @@ function _delete_rules_for_port_in_chain() {
     local mode="$4"
     local all_deleted=true
 
-    # 【核心修复】将过于严格的 grep 模式修正为通用的 TAG 匹配
     iptables-save | grep -- "-A ${chain}" | grep -- "-p ${proto}" | grep -- "--dport ${port}" | grep -- "${COMMENT_TAG}" | while read -r rule; do
         local delete_command="iptables ${rule/-A/-D}"
         
@@ -291,54 +290,57 @@ function view_forwarding_rules() {
     press_enter_to_continue
 }
 
+# [已修复] 删除端口转发规则
 function delete_forwarding_rule() {
     print_info "--- 删除端口转发规则 ---"
-    local rules=()
-    local rule_details=()
+    local menu_options=()
+    local rule_comments=()
     
+    # 从 PREROUTING 链中读取规则来构建菜单
     while IFS= read -r rule; do
-        if [[ $rule =~ ${COMMENT_TAG}:fwd:([0-9]+):to:([^:]+):([0-9]+) ]]; then
-            local from_port=${BASH_REMATCH[1]}
-            local to_ip=${BASH_REMATCH[2]}
-            local to_port=${BASH_REMATCH[3]}
-            rules+=("转发: ${from_port} -> ${to_ip}:${to_port}")
-            rule_details+=("${from_port}|${to_ip}|${to_port}")
+        # 提取完整的 comment 内容作为唯一标识
+        if [[ $rule =~ -m\ comment\ --comment\ \"(${COMMENT_TAG}:fwd:[^\"]+)\" ]]; then
+            local comment_content=${BASH_REMATCH[1]}
+            # 解析 comment 内容用于用户友好的显示
+            if [[ $comment_content =~ :fwd:([0-9]+):to:([^:]+):([0-9]+) ]]; then
+                local from_port=${BASH_REMATCH[1]}
+                local to_ip=${BASH_REMATCH[2]}
+                local to_port=${BASH_REMATCH[3]}
+                menu_options+=("转发: ${from_port} -> ${to_ip}:${to_port}")
+                rule_comments+=("${comment_content}") # 保存唯一的 comment
+            fi
         fi
     done < <(iptables-save -t nat | grep -- "-A PREROUTING" | grep "${COMMENT_TAG}")
 
-    if [ ${#rules[@]} -eq 0 ]; then
+    if [ ${#menu_options[@]} -eq 0 ]; then
         print_warn "没有找到由本脚本管理的任何转发规则。"
         press_enter_to_continue
         return
     fi
 
-    rules+=("返回")
+    menu_options+=("返回")
     print_info "请选择要删除的转发规则:"
-    select choice in "${rules[@]}"; do
+    select choice in "${menu_options[@]}"; do
         if [[ "$choice" == "返回" ]]; then break; fi
         if [ -n "$choice" ]; then
-            local details=${rule_details[$((REPLY-1))]}
-            IFS='|' read -r from_port to_ip to_port <<< "$details"
+            # 获取用户选择的规则对应的唯一 comment
+            local comment_to_delete=${rule_comments[$((REPLY-1))]}
             
-            print_warn "将要删除转发规则: ${from_port} -> ${to_ip}:${to_port}"
+            print_warn "将要删除与此 comment 相关的所有转发规则: \"${comment_to_delete}\""
             read -p "确认删除吗? (y/N): " confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 local all_deleted=true
-                local rule_comment="${COMMENT_TAG}:fwd:${from_port}:to:${to_ip}:${to_port}"
                 
-                local prerouting_spec="-p tcp --dport ${from_port} -m comment --comment \"${rule_comment}\" -j DNAT --to-destination ${to_ip}:${to_port}"
-                print_info "正在删除 PREROUTING 规则..."
-                if ! iptables -t nat -D PREROUTING ${prerouting_spec}; then
-                    all_deleted=false
-                    print_error "删除 PREROUTING 规则失败。"
-                fi
-
-                local output_spec="-p tcp --dport ${from_port} -d 127.0.0.1 -m comment --comment \"${rule_comment}\" -j DNAT --to-destination ${to_ip}:${to_port}"
-                print_info "正在删除 OUTPUT 规则..."
-                if ! iptables -t nat -D OUTPUT ${output_spec}; then
-                    all_deleted=false
-                    print_error "删除 OUTPUT 规则失败。"
-                fi
+                # 使用唯一的 comment 查找 nat 表中所有相关的规则（PREROUTING 和 OUTPUT）
+                iptables-save -t nat | grep -- "-m comment --comment \"${comment_to_delete}\"" | while read -r rule_to_delete; do
+                    # 将 -A 替换为 -D 来构造精确的删除命令
+                    local delete_command="iptables -t nat ${rule_to_delete/-A/-D}"
+                    print_info "正在执行: ${delete_command}"
+                    if ! eval "${delete_command}"; then
+                        all_deleted=false
+                        print_error "命令执行失败！"
+                    fi
+                done
 
                 if $all_deleted; then
                     print_success "转发规则已成功删除。"
@@ -407,7 +409,7 @@ function main_menu() {
         if [ "$IS_DOCKER_HOST" = true ]; then docker_status_text="${C_GREEN}已安装 (深度集成模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  iptables 智能管理脚本 v3.3 (Docker 集成 & 自动保存)  ${C_RESET}"
+        echo -e "${C_CYAN}  iptables 智能管理脚本 v3.4 (Docker 集成 & 自动保存)  ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " Docker 状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
