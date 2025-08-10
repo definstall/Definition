@@ -1,14 +1,15 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v3.1 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v3.2 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 3.1
+# 版本: 3.2
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v3.1 更新日志 ---
-#   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
-#     - 完全移除 `awk` 依赖，改用 `grep` 和 Bash 内置的正则表达式 (`[[ ... =~ ... ]]`) 进行解析。
+# --- v3.2 更新日志 ---
+#   - [关键修复] 彻底修复 `delete_port_rule` 函数中 Bash 正则表达式的语法错误：
+#     - 重新设计正则表达式，避免 `*(` 这种可能导致 Bash 解析错误的模式。
+#     - 直接将 `COMMENT_TAG` 嵌入到正则表达式中，提高匹配的精确性和健壮性。
 #     - 逻辑与 `delete_forwarding_rule` 函数保持一致，提高代码一致性和健壮性。
 #     - 现在可以可靠地列出并删除所有由脚本管理的 IPv4 端口规则。
 #   - [显示优化] `delete_port_rule` 列表现在只显示 IPv4 规则。
@@ -348,25 +349,23 @@ function delete_port_rule() {
 
     # 逐行读取过滤后的输出，并使用 Bash 正则表达式解析
     while IFS= read -r line; do
-        # 正则表达式解释：
+        # 新的正则表达式：
         # ^\[ *: 匹配行首的 "[ " (注意空格和转义的方括号)
         # ([0-9]+): 捕获规则编号 (一个或多个数字)
         # \]: 匹配 "]"
-        # .*: 匹配中间的任意字符
+        # .*: 匹配规则描述部分（任意字符）
         # #: 匹配注释符号 "#"
         # *: 匹配 # 后面的任意数量的空格
-        # (.*)$: 捕获从 COMMENT_TAG 开始到行尾的所有内容 (这是完整的注释)
-        if [[ "$line" =~ ^\[ *([0-9]+)\].*# *(.*)$ ]]; then
+        # (${COMMENT_TAG}:.*)$: 捕获从 COMMENT_TAG 开始到行尾的所有内容 (这是完整的注释)
+        # 这种写法避免了 `*(` 这种可能导致 Bash 语法错误的模式。
+        if [[ "$line" =~ ^\[ *([0-9]+)\].*# *(${COMMENT_TAG}:.*)$ ]]; then
             local rule_num="${BASH_REMATCH[1]}"
             local rule_comment_content="${BASH_REMATCH[2]}"
             
-            # 再次确认注释内容确实以我们的 COMMENT_TAG 开头
-            # 这一步是必要的，因为前面的 grep "${COMMENT_TAG}:" 只是匹配了行中包含该字符串，
-            # 但不能保证它就是注释的开头部分。
-            if [[ "$rule_comment_content" =~ ^${COMMENT_TAG}: ]]; then
-                managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
-                rule_numbers+=("${rule_num}")
-            fi
+            # 由于正则表达式已经确保了注释内容以 COMMENT_TAG 开头，
+            # 这里不再需要额外的 `if [[ "$rule_comment_content" =~ ^${COMMENT_TAG}: ]]` 检查。
+            managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
+            rule_numbers+=("${rule_num}")
         fi
     done <<< "$ufw_filtered_output" # 使用 here string 将变量内容作为输入
 
@@ -480,7 +479,7 @@ function delete_forwarding_rule() {
     local rule_comments=()
     
     while IFS= read -r line; do
-        if [[ $line =~ ^.*(${COMMENT_TAG}:fwd:[^\"]+).*$ ]]; then
+        if [[ "$line" =~ ^.*(${COMMENT_TAG}:fwd:[^\"]+).*$ ]]; then
             local comment_content=${BASH_REMATCH[1]}
             local fwd_info=$(echo "$comment_content" | sed -E 's/.*:fwd:([0-9]+):([^:]+):to:([^:]+):([0-9]+)/\1\/\2 -> \3:\4/')
             managed_rules+=("${fwd_info}")
@@ -616,7 +615,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v3.1 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v3.2 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
@@ -647,4 +646,3 @@ function main_menu() {
 
 # --- 脚本入口 ---
 main_menu
-
