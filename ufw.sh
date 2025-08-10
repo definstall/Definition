@@ -1,17 +1,18 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v2.0 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v2.1 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 2.0
+# 版本: 2.1
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v2.0 更新日志 ---
+# --- v2.1 更新日志 ---
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
-#     - 优化了 `awk` 脚本，确保正确提取并清理注释内容中的前导空格。
-#     - 现在可以可靠地列出并删除所有由脚本管理的 IPv4 和 IPv6 端口规则。
-#   - [显示优化] `view_port_rules` 和 `delete_port_rule` 列表现在会显示所有由脚本管理的规则，
-#     包括 IPv4 和 IPv6 规则，以提供更全面的视图。
+#     - 采用更健壮的 `awk` 命令和 `gensub` 函数来解析 `ufw status numbered` 输出，
+#       精确提取规则编号和清理后的注释内容。
+#     - 现在可以可靠地列出并删除所有由脚本管理的 IPv4 端口规则。
+#   - [显示优化] `delete_port_rule` 列表现在只显示 IPv4 规则 (重新启用 (v6) 过滤)。
+#   - [显示优化] `view_port_rules` 列表现在显示所有由脚本管理的规则，包括 IPv4 和 IPv6。
 #   - [功能变更] 默认初始化时不再开放 2525/tcp 端口，仅默认开放 22/tcp (SSH)。
 #   - [关键修复] 修复 `initialize_firewall` 函数中 `if` 语句的语法错误 (缺少 `fi`)。
 #   - [用户体验] 自动处理 UFW 启用/重新加载/删除时的 SSH 连接中断警告，不再需要手动确认。
@@ -296,7 +297,6 @@ function add_port_rule() {
     # UFW allow 命令是幂等的，重复执行不会创建重复规则，但为了清晰和修改规则，先删除旧的再添加新的。
     # 查找并删除所有匹配该端口、协议和来源IP的规则
     print_info "正在检查并删除端口 ${port}/${proto} (来源: ${source_ip:-所有IP}) 的旧规则..."
-    # 改进 grep 模式，确保匹配到正确的注释，并排除 IPv6
     # 注意：这里仍然排除 IPv6，因为添加规则时通常只考虑 IPv4，避免重复添加 IPv6 规则。
     local existing_rules=$(sudo ufw status numbered | grep -E "${COMMENT_TAG}:port:${port}:${proto}(:from:${source_ip})?$" | grep -v '(v6)' | awk '{print $1}' | sed 's/\[//;s/\]//' | sort -nr)
     for num in $existing_rules; do
@@ -328,20 +328,20 @@ function view_port_rules() {
 }
 
 function delete_port_rule() {
-    print_info "--- 删除端口规则 (包括 IPv4 和 IPv6) ---"
+    print_info "--- 删除端口规则 (仅显示 IPv4) ---"
     local managed_rules=()
     local rule_numbers=()
     
-    # 收集由脚本管理的所有 IPv4 和 IPv6 规则
-    # 使用 awk 进行更健壮的解析，并移除 IPv6 过滤
+    # 收集由脚本管理的所有 IPv4 规则
+    # 使用 awk 进行更健壮的解析，并重新加入 IPv6 过滤
     local awk_script='
         BEGIN { FS = "#" } # 将 # 设置为字段分隔符
-        /^\\[[0-9]+\\]/ && /'"${COMMENT_TAG}:"'/ { # 匹配以 "[数字]" 开头且包含我们注释标签的行
+        /^\\[[0-9]+\\]/ && !/\(v6\)/ && $0 ~ /'"${COMMENT_TAG}:"'/ { # 匹配以 "[数字]" 开头，不含 "(v6)"，且包含我们注释标签的行
             # 提取规则编号
-            match($0, /^\\[ *([0-9]+)\\]/);
-            rule_num = substr($0, RSTART + RLENGTH - 1, RLENGTH - 2); # 提取括号内的数字
+            rule_num = gensub(/\[ *([0-9]+)\].*/, "\\1", "1", $0);
 
             # 提取注释内容，并移除前导空格
+            # $2 是 # 之后的部分，可能包含前导空格
             rule_comment_content = $2;
             sub(/^ */, "", rule_comment_content); # 移除所有前导空格
 
@@ -351,15 +351,15 @@ function delete_port_rule() {
     
     # 将 ufw status numbered 的输出通过管道传递给 awk，然后 awk 的输出再传递给 while read
     while IFS=$'\t' read -r rule_num rule_comment_content; do
-        # 确保提取到了编号，并且注释内容以我们的 COMMENT_TAG 开头
-        if [[ -n "$rule_num" && "$rule_comment_content" =~ ^${COMMENT_TAG}: ]]; then
+        # awk 已经确保了规则是脚本管理的且是 IPv4，所以这里只需要确保成功提取到编号
+        if [[ -n "$rule_num" ]]; then
             managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
             rule_numbers+=("${rule_num}")
         fi
     done < <(sudo ufw status numbered | awk "$awk_script")
 
     if [ ${#managed_rules[@]} -eq 0 ]; then
-        print_warn "没有找到由本脚本管理的任何端口规则。"
+        print_warn "没有找到由本脚本管理的任何 IPv4 端口规则。"
         press_enter_to_continue
         return
     fi
@@ -604,7 +604,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.0 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.1 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
