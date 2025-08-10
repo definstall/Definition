@@ -1,16 +1,16 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v1.7 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v1.8 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 1.7
+# 版本: 1.8
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v1.7 更新日志 ---
-#   - [关键修复] 修复 `initialize_firewall` 函数中 `if` 语句的语法错误 (缺少 `fi`)。
+# --- v1.8 更新日志 ---
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
-#     - 优化了规则收集逻辑，使用更健壮的正则表达式匹配 `ufw status numbered` 输出。
+#     - 优化了规则收集逻辑中的正则表达式，使其能够正确匹配 `#` 后带有或不带空格的注释。
 #     - 现在可以正确列出并删除所有由脚本管理的 IPv4 端口规则（包括默认的 22/tcp 和用户添加的）。
+#   - [关键修复] 修复 `initialize_firewall` 函数中 `if` 语句的语法错误 (缺少 `fi`)。
 #   - [功能变更] 默认初始化时不再开放 2525/tcp 端口，仅默认开放 22/tcp (SSH)。
 #   - [显示优化] `view_port_rules` 和 `delete_port_rule` 列表不再显示 IPv6 规则 (含有 (v6) 的行)。
 #   - [用户体验] 自动处理 UFW 启用/重新加载/删除时的 SSH 连接中断警告，不再需要手动确认。
@@ -335,7 +335,8 @@ function delete_port_rule() {
     while IFS= read -r line; do
         # 匹配并提取编号和完整的注释部分
         # 示例行: [ 1] 22/tcp                     ALLOW IN    Anywhere                  # managed-by-ufw-script:default:ssh
-        if [[ "$line" =~ ^\[([0-9]+)\]\ .*#\ ${COMMENT_TAG}:(.*) ]]; then
+        # 修复：使 # 后面的空格可选，以兼容不同 UFW 版本或输出格式
+        if [[ "$line" =~ ^\[([0-9]+)\]\ .*#\?${COMMENT_TAG}:(.*) ]]; then
             local rule_num=${BASH_REMATCH[1]}
             local rule_desc="${COMMENT_TAG}:${BASH_REMATCH[2]}" # 重新构建完整的注释
             managed_rules+=("规则 [${rule_num}]: ${rule_desc}")
@@ -589,7 +590,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.7 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.8 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
