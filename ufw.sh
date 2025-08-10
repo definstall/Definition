@@ -1,17 +1,16 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v2.7 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v2.9 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 2.7
+# 版本: 2.9
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v2.7 更新日志 ---
+# --- v2.9 更新日志 ---
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
-#     - 移除管道中错误的 `grep --color=never` 命令。
-#     - `awk` 脚本完全重写，不再使用 `gensub` 函数，改为使用标准的 `match`, `substr`, `sub`。
-#     - 优化 `awk` 内部的正则表达式和逻辑，更健壮地提取规则编号和注释内容，
-#       解决了注释前可变空格导致的问题。
+#     - 修复 `awk` 脚本中正则表达式 `[` 和 `]` 的转义问题，确保它们在字符串字面量中被正确匹配。
+#     - 移除 `delete_port_rule` 管道中多余且错误的 `grep --color=never` 命令。
+#     - 优化 `awk` 内部的逻辑，更健壮地提取规则编号和注释内容。
 #     - 现在可以可靠地列出并删除所有由脚本管理的 IPv4 端口规则。
 #   - [显示优化] `delete_port_rule` 列表现在只显示 IPv4 规则。
 #   - [显示优化] `view_port_rules` 列表现在显示所有由脚本管理的规则，包括 IPv4 和 IPv6。
@@ -188,7 +187,6 @@ function initialize_firewall() {
         before_rules_docker_content=$(printf "%b" "${UFW_DOCKER_FORWARD_RULES_BEGIN}\n")
         before_rules_docker_content+=$(printf "%b" "# Allow all established/related connections for forwarded traffic\n")
         before_rules_docker_content+=$(printf "%b" "-A ufw-user-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n")
-        before_rules_docker_content+=$(printf "%b" "# Drop all other forwarded traffic not explicitly allowed by UFW rules\n")
         before_rules_docker_content+=$(printf "%b" "-A ufw-user-forward -j DROP\n") # 这是 Docker 兼容模式下“默认拒绝”的关键
         before_rules_docker_content+=$(printf "%b" "${UFW_DOCKER_FORWARD_RULES_END}")
     fi
@@ -347,13 +345,13 @@ function delete_port_rule() {
         /^\\[[0-9]+\\]/ && !/\\(v6\\)/ && $0 ~ comment_pattern {
             # 提取规则编号
             # 匹配 [ 1] 或 [1] 这样的格式，并捕获数字
-            match($0, /^\\[ *([0-9]+)\\]/);
-            rule_num = substr($0, RSTART + RLENGTH - length(gensub(/.*\\[ *([0-9]+)\\].*/, "\\1", "1", $0)), length(gensub(/.*\\[ *([0-9]+)\\].*/, "\\1", "1", $0)));
-            # 简化 rule_num 提取，直接用 substr 和 sub
-            rule_num_str = $1; # Get the first field, e.g., "[ 1]"
-            sub(/^\\[ */, "", rule_num_str); # Remove "[ "
-            sub(/\\]$/, "", rule_num_str);   # Remove "]"
-            rule_num = rule_num_str;
+            # 使用 match() 捕获数字，更健壮
+            if (match($0, /^\\[ *([0-9]+)\\]/, num_arr)) {
+                rule_num = num_arr[1];
+            } else {
+                # 如果无法提取编号，则跳过此行
+                next;
+            }
 
             # 提取注释内容 (从 # 后面开始，并移除前导空格)
             # 找到 # 的位置
@@ -630,7 +628,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.7 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.9 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
