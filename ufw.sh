@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v1.8 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v1.9 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 1.8
+# 版本: 1.9
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v1.8 更新日志 ---
+# --- v1.9 更新日志 ---
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
-#     - 优化了规则收集逻辑中的正则表达式，使其能够正确匹配 `#` 后带有或不带空格的注释。
-#     - 现在可以正确列出并删除所有由脚本管理的 IPv4 端口规则（包括默认的 22/tcp 和用户添加的）。
+#     - 采用更健壮的 `awk` 命令来解析 `ufw status numbered` 输出，精确提取规则编号和注释。
+#     - 现在可以可靠地列出并删除所有由脚本管理的 IPv4 端口规则（包括默认的 22/tcp 和用户添加的）。
 #   - [关键修复] 修复 `initialize_firewall` 函数中 `if` 语句的语法错误 (缺少 `fi`)。
 #   - [功能变更] 默认初始化时不再开放 2525/tcp 端口，仅默认开放 22/tcp (SSH)。
 #   - [显示优化] `view_port_rules` 和 `delete_port_rule` 列表不再显示 IPv6 规则 (含有 (v6) 的行)。
@@ -169,7 +169,7 @@ function initialize_firewall() {
     sudo ufw default allow outgoing
 
     # 配置 /etc/default/ufw 中的 FORWARD 策略
-    # Docker 兼容模式下，FORWARD 必须是 ACCEPT，然后通过 before.rules 中的 DROP 来控制
+    # Docker 兼容模式下，FORWARD必须是ACCEPT，然后通过before.rules中的DROP来控制
     sudo sed -i '/^DEFAULT_FORWARD_POLICY=/c\DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw
     print_info "已将 /etc/default/ufw 中的 DEFAULT_FORWARD_POLICY 设置为 ACCEPT (Docker 兼容性要求)。"
 
@@ -331,18 +331,37 @@ function delete_port_rule() {
     local rule_numbers=()
     
     # 收集由脚本管理的所有 IPv4 规则 (包括默认和用户添加的)
-    # 优化：将 grep 过滤放在 while 循环外部，提高效率和准确性
-    while IFS= read -r line; do
-        # 匹配并提取编号和完整的注释部分
-        # 示例行: [ 1] 22/tcp                     ALLOW IN    Anywhere                  # managed-by-ufw-script:default:ssh
-        # 修复：使 # 后面的空格可选，以兼容不同 UFW 版本或输出格式
-        if [[ "$line" =~ ^\[([0-9]+)\]\ .*#\?${COMMENT_TAG}:(.*) ]]; then
-            local rule_num=${BASH_REMATCH[1]}
-            local rule_desc="${COMMENT_TAG}:${BASH_REMATCH[2]}" # 重新构建完整的注释
-            managed_rules+=("规则 [${rule_num}]: ${rule_desc}")
+    # 使用 awk 进行更健壮的解析
+    # awk 脚本解释:
+    #   - /^\\[[0-9]+\\]/ : 匹配以 "[数字]" 开头的行 (UFW 规则行)
+    #   - !/\(v6\)/ : 排除包含 "(v6)" 的行 (IPv6 规则)
+    #   - /$COMMENT_TAG:/ : 匹配包含我们的注释标签的行
+    #   - match($0, /^\\[ *([0-9]+)\\]/) : 提取规则编号
+    #   - match($0, /# *(.*)/) : 提取注释内容 (从 # 后面开始)
+    #   - print RSTART_NUM, RSTART_COMMENT : 打印提取到的编号和注释，用制表符分隔
+    local awk_script='
+        BEGIN { FS = "#" } # 将 # 设置为字段分隔符
+        /^\\[[0-9]+\\]/ && !/\(v6\)/ && /'"${COMMENT_TAG}:"'/ {
+            # 提取规则编号
+            match($0, /^\\[ *([0-9]+)\\]/);
+            rule_num = substr($0, RSTART + RLENGTH - 1, RLENGTH - 2); # 提取括号内的数字
+
+            # 提取注释内容
+            match($0, /# *(.*)/);
+            rule_comment_content = substr($0, RSTART + RLENGTH - 1, RLENGTH - RSTART); # 提取 # 后的内容
+
+            print rule_num "\t" rule_comment_content
+        }
+    '
+    
+    # 将 ufw status numbered 的输出通过管道传递给 awk，然后 awk 的输出再传递给 while read
+    while IFS=$'\t' read -r rule_num rule_comment_content; do
+        # 确保提取到了编号，并且注释内容以我们的 COMMENT_TAG 开头
+        if [[ -n "$rule_num" && "$rule_comment_content" =~ ^${COMMENT_TAG}: ]]; then
+            managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
             rule_numbers+=("${rule_num}")
         fi
-    done < <(sudo ufw status numbered | grep "${COMMENT_TAG}:" | grep -v '(v6)')
+    done < <(sudo ufw status numbered | awk "$awk_script")
 
     if [ ${#managed_rules[@]} -eq 0 ]; then
         print_warn "没有找到由本脚本管理的任何 IPv4 端口规则。"
@@ -590,7 +609,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.8 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.9 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
