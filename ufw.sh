@@ -1,15 +1,16 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v2.3 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v2.4 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 2.3
+# 版本: 2.4
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v2.3 更新日志 ---
+# --- v2.4 更新日志 ---
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
-#     - 采用更健壮的 `awk` 命令和 `gensub` 函数来解析 `ufw status numbered` 输出，
-#       精确提取规则编号和清理后的注释内容，解决了注释前空格导致的问题。
+#     - 修正 `awk` 脚本中 `gensub` 作用对象为 `$0` (整行)。
+#     - 通过 `-v` 选项将 `COMMENT_TAG` 安全地传递给 `awk`。
+#     - 优化 `awk` 内部的正则表达式，更精确地匹配注释。
 #     - 现在可以可靠地列出并删除所有由脚本管理的 IPv4 端口规则。
 #   - [显示优化] `delete_port_rule` 列表现在只显示 IPv4 规则 (重新启用 (v6) 过滤)。
 #   - [显示优化] `view_port_rules` 列表现在显示所有由脚本管理的规则，包括 IPv4 和 IPv6。
@@ -334,28 +335,36 @@ function delete_port_rule() {
     
     # 收集由脚本管理的所有 IPv4 规则
     # 使用 awk 进行更健壮的解析，并重新加入 IPv6 过滤
+    # 将 COMMENT_TAG 作为 awk 变量传递，避免 shell 变量在 awk 脚本中直接拼接的复杂性
     local awk_script='
-        BEGIN { FS = "#" } # 将 # 设置为字段分隔符
-        /^\\[[0-9]+\\]/ && !/\\(v6\\)/ && $2 ~ /'"${COMMENT_TAG}"':/ { # 匹配以 "[数字]" 开头，不含 "(v6)"，且注释部分包含我们的标签
+        BEGIN {
+            # 定义一个正则表达式模式，用于匹配注释标签，包括前面的 # 和可选的空格
+            comment_pattern = "# *" tag ":";
+        }
+        # 匹配以 "[数字]" 开头，不含 "(v6)"，并且包含我们注释标签的行
+        /^\\[[0-9]+\\]/ && !/\\(v6\\)/ && $0 ~ comment_pattern {
             # 提取规则编号
-            rule_num = gensub(/^\\[ *([0-9]+)\\].*/, "\\1", "1", $1);
+            # gensub(regex, replacement, how, string)
+            # "\\1" 引用第一个捕获组 (数字)
+            rule_num = gensub(/^\\[ *([0-9]+)\\].*/, "\\1", "1", $0);
 
-            # 获取注释内容，并移除前导空格
-            rule_comment_content = $2;
-            sub(/^ */, "", rule_comment_content); # 移除所有前导空格
-
+            # 提取注释内容 (从 # 后面开始，并移除前导空格)
+            # 匹配从 # 开始，后面跟可选空格，然后是我们的标签，再捕获标签之后的所有内容
+            rule_comment_content = gensub(".*" comment_pattern "(.*)$", tag ":\\1", "1", $0);
+            
+            # 打印提取到的编号和注释，用制表符分隔
             print rule_num "\t" rule_comment_content;
         }
     '
     
-    # 将 ufw status numbered 的输出通过管道传递给 awk，然后 awk 的输出再传递给 while read
+    # 将 ufw status numbered 的输出通过管道传递给 awk，并传递 COMMENT_TAG 变量
     while IFS=$'\t' read -r rule_num rule_comment_content; do
         # awk 已经完成了大部分过滤和解析，这里只需确保成功提取到编号和内容
         if [[ -n "$rule_num" && -n "$rule_comment_content" ]]; then
             managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
             rule_numbers+=("${rule_num}")
         fi
-    done < <(sudo ufw status numbered | awk "$awk_script")
+    done < <(sudo ufw status numbered | awk -v tag="${COMMENT_TAG}" "$awk_script")
 
     if [ ${#managed_rules[@]} -eq 0 ]; then
         print_warn "没有找到由本脚本管理的任何 IPv4 端口规则。"
@@ -603,7 +612,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.3 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.4 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
