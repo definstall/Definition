@@ -1,19 +1,21 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v1.3 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v1.5 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 1.3
+# 版本: 1.5
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v1.3 更新日志 ---
-#   - [关键修复] 修复 `view_port_rules` 函数无法显示默认开放端口 (22/2525) 的问题，
-#     现在会显示所有由脚本管理的端口规则。
+# --- v1.5 更新日志 ---
+#   - [关键修复] 优化 `delete_port_rule` 函数：
+#     - 现在可以列出并删除所有由脚本管理的端口规则，包括默认开放的 22/tcp。
+#     - 移除了“默认端口不在此列表中”的提示，因为它们现在可以被删除。
+#   - [功能变更] 默认初始化时不再开放 2525/tcp 端口，仅默认开放 22/tcp (SSH)。
 #   - [用户体验] 自动处理 UFW 启用/重新加载/删除时的 SSH 连接中断警告，不再需要手动确认。
 #   - [用户体验] 修复 `read -p` 中颜色代码显示为乱码的问题，将彩色文本与 `read` 提示分离。
 #   - [关键修复] 增强 `ufw enable` 和 `ufw reload` 的健壮性检查，确保防火墙规则正确加载。
 #   - [问题解决] 修复因 UFW 未成功启用导致“没有看到已添加端口”的问题。
-#   - [优化] 明确提示默认开放的 22/tcp 和 2525/tcp 端口。
+#   - [优化] 明确提示默认开放的 22/tcp 端口。
 #   - [优化] 端口管理和转发管理中的 `grep` 模式更精确，避免误删。
 # ==============================================================================
 
@@ -88,6 +90,12 @@ function initialize_firewall() {
     sudo iptables -P INPUT ACCEPT; sudo iptables -P FORWARD ACCEPT; sudo iptables -P OUTPUT ACCEPT
     sudo iptables -t nat -P PREROUTING ACCEPT; sudo iptables -t nat -P POSTROUTING ACCEPT; sudo iptables -t nat -P OUTPUT ACCEPT
     print_success "iptables 规则清理完成。"
+
+    # --- 新增：重置 UFW 到初始状态 ---
+    print_info "正在重置 UFW 到初始状态 (这将删除所有现有 UFW 规则)..."
+    echo "y" | sudo ufw reset || { print_error "重置 UFW 失败。"; exit 1; }
+    print_success "UFW 已重置。"
+    # --- 新增结束 ---
 
     # 1.3 Docker 存在时的交互式处理
     if command -v docker &> /dev/null; then
@@ -199,11 +207,12 @@ function initialize_firewall() {
     sudo sysctl -p > /dev/null
     print_success "IP 转发已启用并持久化。"
 
-    # 1.7 允许默认端口 (22, 2525)
-    print_info "正在开放默认端口 22/tcp (SSH) 和 2525/tcp..."
+    # 1.7 允许默认端口 (22)
+    print_info "正在开放默认端口 22/tcp (SSH)..."
     # UFW allow 命令是幂等的，重复执行不会创建重复规则
     sudo ufw allow 22/tcp comment "${COMMENT_TAG}:default:ssh"
-    sudo ufw allow 2525/tcp comment "${COMMENT_TAG}:default:custom_port"
+    # 移除 2525/tcp 的默认添加
+    # sudo ufw allow 2525/tcp comment "${COMMENT_TAG}:default:custom_port"
     print_success "默认端口开放完成。"
 
     # 1.8 添加安全加固规则 (UFW 内置的 limit 规则)
@@ -318,11 +327,11 @@ function delete_port_rule() {
     local managed_rules=()
     local rule_numbers=()
     
-    # 收集由脚本管理的规则 (只收集用户添加的端口规则，不包括默认规则)
+    # 收集由脚本管理的所有规则 (包括默认和用户添加的)
     while IFS= read -r line; do
-        if [[ $line =~ ^\[([0-9]+)\]\ ALLOW\ .*${COMMENT_TAG}:port: ]]; then
+        if [[ $line =~ ^\[([0-9]+)\]\ ALLOW\ .*${COMMENT_TAG}: ]]; then # 匹配所有带脚本注释的规则
             local rule_num=${BASH_REMATCH[1]}
-            local rule_desc=$(echo "$line" | sed -E "s/.*(${COMMENT_TAG}:port:[^ ]+).*/\1/")
+            local rule_desc=$(echo "$line" | sed -E "s/.*(${COMMENT_TAG}:[^ ]+).*/\1/") # 提取完整的注释
             managed_rules+=("规则 [${rule_num}]: ${rule_desc}")
             rule_numbers+=("${rule_num}")
         fi
@@ -330,7 +339,6 @@ function delete_port_rule() {
 
     if [ ${#managed_rules[@]} -eq 0 ]; then
         print_warn "没有找到由本脚本管理的任何端口规则。"
-        print_info "默认端口 (22/tcp, 2525/tcp) 不在此列表中，如需删除请手动操作或使用卸载功能。"
         press_enter_to_continue
         return
     fi
@@ -473,7 +481,7 @@ function delete_forwarding_rule() {
             print_error "无效选项。"; fi
         break
     done
-    press_enter_to_continue
+    press_enter_continue
 }
 
 # 4. 负载均衡/轮询功能 (不实现，提供建议)
@@ -574,7 +582,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.3 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.5 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
