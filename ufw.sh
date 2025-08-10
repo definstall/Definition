@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v2.9 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v3.0 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 2.9
+# 版本: 3.0
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v2.9 更新日志 ---
+# --- v3.0 更新日志 ---
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
 #     - 修复 `awk` 脚本中正则表达式 `[` 和 `]` 的转义问题，确保它们在字符串字面量中被正确匹配。
 #     - 移除 `delete_port_rule` 管道中多余且错误的 `grep --color=never` 命令。
@@ -323,6 +323,7 @@ function add_port_rule() {
 function view_port_rules() {
     print_info "--- 当前由脚本管理的 UFW 规则 (包括 IPv4 和 IPv6) ---"
     # 修复：确保显示所有由脚本添加的规则 (包括默认和用户自定义的)，不再排除 IPv6
+    # 使用 --color=never 确保输出没有颜色代码，方便 grep 和 awk 处理
     sudo ufw status numbered | grep --color=never "${COMMENT_TAG}:"
     press_enter_to_continue
 }
@@ -346,7 +347,7 @@ function delete_port_rule() {
             # 提取规则编号
             # 匹配 [ 1] 或 [1] 这样的格式，并捕获数字
             # 使用 match() 捕获数字，更健壮
-            if (match($0, /^\\[ *([0-9]+)\\]/, num_arr)) {
+            if (match($0, /^\\\[ *([0-9]+)\\\]/, num_arr)) { # 修正：转义 [ 和 ]
                 rule_num = num_arr[1];
             } else {
                 # 如果无法提取编号，则跳过此行
@@ -374,6 +375,8 @@ function delete_port_rule() {
     
     # 将 ufw status numbered 的输出通过管道传递给 awk，并传递 COMMENT_TAG 变量
     # 确保 awk 接收到纯净的文本，并且 awk 内部完成所有过滤
+    # 移除 `grep --color=never`，因为 `ufw status numbered` 管道到 awk 时通常不会有颜色，
+    # 且 `grep` 没有模式会导致其打印用法信息。
     while IFS=$'\t' read -r rule_num rule_comment_content; do
         # awk 已经完成了所有过滤和解析，这里只需确保成功提取到编号和内容
         if [[ -n "$rule_num" && -n "$rule_comment_content" ]]; then
@@ -628,7 +631,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.9 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v3.0 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
