@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v2.1 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v2.2 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 2.1
+# 版本: 2.2
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v2.1 更新日志 ---
+# --- v2.2 更新日志 ---
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
 #     - 采用更健壮的 `awk` 命令和 `gensub` 函数来解析 `ufw status numbered` 输出，
-#       精确提取规则编号和清理后的注释内容。
+#       精确提取规则编号和清理后的注释内容，解决了注释前空格导致的问题。
 #     - 现在可以可靠地列出并删除所有由脚本管理的 IPv4 端口规则。
 #   - [显示优化] `delete_port_rule` 列表现在只显示 IPv4 规则 (重新启用 (v6) 过滤)。
 #   - [显示优化] `view_port_rules` 列表现在显示所有由脚本管理的规则，包括 IPv4 和 IPv6。
@@ -335,24 +335,28 @@ function delete_port_rule() {
     # 收集由脚本管理的所有 IPv4 规则
     # 使用 awk 进行更健壮的解析，并重新加入 IPv6 过滤
     local awk_script='
-        BEGIN { FS = "#" } # 将 # 设置为字段分隔符
-        /^\\[[0-9]+\\]/ && !/\(v6\)/ && $0 ~ /'"${COMMENT_TAG}:"'/ { # 匹配以 "[数字]" 开头，不含 "(v6)"，且包含我们注释标签的行
-            # 提取规则编号
-            rule_num = gensub(/\[ *([0-9]+)\].*/, "\\1", "1", $0);
+        /^\\[[0-9]+\\]/ && !/\\(v6\\)/ { # 匹配以 "[数字]" 开头，不含 "(v6)"
+            # 检查行中是否包含我们的注释标签
+            if ($0 ~ /# *'"${COMMENT_TAG}"':/) {
+                # 提取规则编号
+                rule_num = gensub(/^\\[ *([0-9]+)\\].*/, "\\1", "1", $0);
 
-            # 提取注释内容，并移除前导空格
-            # $2 是 # 之后的部分，可能包含前导空格
-            rule_comment_content = $2;
-            sub(/^ */, "", rule_comment_content); # 移除所有前导空格
-
-            print rule_num "\t" rule_comment_content
+                # 提取注释内容 (从 # 后面开始，并移除前导空格)
+                # 使用 gensub 提取 # 后面直到行尾的内容，并移除前导空格
+                rule_comment_content = gensub(/.*# *(.*)$/, "\\1", "1", $0);
+                
+                # 再次确认提取到的注释内容以 COMMENT_TAG 开头
+                if (rule_comment_content ~ /^'"${COMMENT_TAG}"':/) {
+                    print rule_num "\t" rule_comment_content;
+                }
+            }
         }
     '
     
     # 将 ufw status numbered 的输出通过管道传递给 awk，然后 awk 的输出再传递给 while read
     while IFS=$'\t' read -r rule_num rule_comment_content; do
-        # awk 已经确保了规则是脚本管理的且是 IPv4，所以这里只需要确保成功提取到编号
-        if [[ -n "$rule_num" ]]; then
+        # awk 已经完成了大部分过滤和解析，这里只需确保成功提取到编号和内容
+        if [[ -n "$rule_num" && -n "$rule_comment_content" ]]; then
             managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
             rule_numbers+=("${rule_num}")
         fi
@@ -604,7 +608,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.1 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.2 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
