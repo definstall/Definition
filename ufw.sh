@@ -1,12 +1,13 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v1.6 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v1.7 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 1.6
+# 版本: 1.7
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v1.6 更新日志 ---
+# --- v1.7 更新日志 ---
+#   - [关键修复] 修复 `initialize_firewall` 函数中 `if` 语句的语法错误 (缺少 `fi`)。
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
 #     - 优化了规则收集逻辑，使用更健壮的正则表达式匹配 `ufw status numbered` 输出。
 #     - 现在可以正确列出并删除所有由脚本管理的 IPv4 端口规则（包括默认的 22/tcp 和用户添加的）。
@@ -47,7 +48,8 @@ IS_UFW_DOCKER_COMPATIBLE=false
 # 1. 初始化防火墙
 function initialize_firewall() {
     print_info "开始初始化防火墙配置..."
-    if [[ $EUID -ne 0 ]]; then print_error "此脚本必须以 root 权限运行。"; exit 1; }
+    # 修复：if 语句的语法错误，将 `}` 替换为 `fi`
+    if [[ $EUID -ne 0 ]]; then print_error "此脚本必须以 root 权限运行。"; exit 1; fi
 
     # 1.1 检测并处理其他防火墙
     if command -v ufw &> /dev/null; then
@@ -587,7 +589,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.6 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.7 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
