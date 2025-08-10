@@ -1,19 +1,20 @@
 #!/bin/bash
 
 # ==============================================================================
-# iptables 智能管理脚本 v3.4 (深度 Docker 集成 & 自动保存)
+# iptables 智能管理脚本 v4.1 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 3.4
+# 版本: 4.1
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v3.4 更新日志 ---
-#   - [BUG 修复] 彻底修复了端口转发(NAT)的删除功能。重构了其删除逻辑，
-#     采用与端口删除相同的健壮模式：使用规则的 comment 作为唯一标识，
-#     从 `iptables-save` 获取精确规则并用 `eval` 执行删除，解决了参数解析错误。
+# --- v4.1 更新日志 ---
+#   - [配置优化] 移除了初始化时默认开放 2525/tcp 端口的规则。
 #
-# --- v3.3 更新日志 ---
-#   - [BUG 修复] 统一了列表和删除操作中的 `grep` 逻辑，确保删除函数能正确匹配
-#     到所有由脚本管理的规则。
+# --- v4.0 更新日志 ---
+#   - [核心安全升级] 实现 "Secure by Default"（默认安全）模型：
+#     - 初始化时，会在 DOCKER-USER 链的末尾添加一条 DROP 规则。
+#     - 这意味着，任何未被本脚本明确允许的 Docker 端口，都将被阻止访问。
+#   - [逻辑变更] 添加端口规则时，对 DOCKER-USER 链使用 `iptables -I` (插入)
+#     而非 `-A` (追加)，以确保新规则在最终的 DROP 规则之前生效。
 # ==============================================================================
 
 # --- 颜色定义 ---
@@ -56,6 +57,8 @@ function initialize_firewall() {
 
     print_info "正在应用基础规则集..."
     iptables -F INPUT; iptables -F OUTPUT; iptables -F FORWARD
+    if iptables -L DOCKER-USER &>/dev/null; then iptables -F DOCKER-USER; fi
+
     iptables -P INPUT DROP
     iptables -P OUTPUT ACCEPT
     iptables -A INPUT -i lo -j ACCEPT
@@ -63,8 +66,8 @@ function initialize_firewall() {
 
     if command -v docker &> /dev/null; then
         IS_DOCKER_HOST=true
-        print_warn "检测到 Docker！为了不破坏容器网络，本脚本不会修改 'FORWARD' 链的策略。"
-        print_info "所有端口规则将同时应用于 'INPUT' (主机) 和 'DOCKER-USER' (容器) 链。"
+        print_warn "检测到 Docker！将启用 'Secure by Default' 模式。"
+        print_info "所有端口规则将应用于 'INPUT' (主机) 和 'DOCKER-USER' (容器) 链。"
         iptables -N DOCKER-USER &>/dev/null
     else
         IS_DOCKER_HOST=false
@@ -79,13 +82,16 @@ function initialize_firewall() {
     iptables -A INPUT -p tcp --syn -m limit --limit 1/s --limit-burst 3 -j ACCEPT
     iptables -A INPUT -p tcp --syn -j DROP
 
-    print_info "正在开放默认端口 22/tcp (SSH) 和 2525/tcp..."
+    print_info "正在开放默认端口 22/tcp (SSH)..."
     iptables -A INPUT -p tcp --dport 22 -m comment --comment "${COMMENT_TAG}:default:ssh" -j ACCEPT
-    iptables -A INPUT -p tcp --dport 2525 -m comment --comment "${COMMENT_TAG}:default:2525" -j ACCEPT
+    
     if [ "$IS_DOCKER_HOST" = true ]; then
-        print_info "同时为 DOCKER-USER 链开放默认端口。"
-        iptables -A DOCKER-USER -p tcp --dport 22 -m comment --comment "${COMMENT_TAG}:default:ssh" -j ACCEPT
-        iptables -A DOCKER-USER -p tcp --dport 2525 -m comment --comment "${COMMENT_TAG}:default:2525" -j ACCEPT
+        print_info "同时为 DOCKER-USER 链开放默认端口 (插入规则)。"
+        iptables -I DOCKER-USER 1 -p tcp --dport 22 -m comment --comment "${COMMENT_TAG}:default:ssh" -j ACCEPT
+        
+        print_info "正在为 DOCKER-USER 链设置默认拒绝策略..."
+        # [核心安全升级] 确保链末尾是 DROP，实现默认拒绝
+        iptables -A DOCKER-USER -m comment --comment "default-deny-all" -j DROP
     fi
     
     save_rules
@@ -145,6 +151,7 @@ function add_port_rule() {
     fi
     base_cmd_part+=" -m comment --comment \"${rule_comment}\" -j ACCEPT"
 
+    # 对 INPUT 链使用追加 (-A)
     local cmd_input="iptables -A INPUT ${base_cmd_part}"
     print_info "将执行: ${cmd_input}"
     if ! eval ${cmd_input}; then
@@ -152,7 +159,8 @@ function add_port_rule() {
     fi
 
     if [ "$IS_DOCKER_HOST" = true ]; then
-        local cmd_docker="iptables -A DOCKER-USER ${base_cmd_part}"
+        # [核心安全升级] 对 DOCKER-USER 链使用插入 (-I)，确保规则在最终的 DROP 规则之前
+        local cmd_docker="iptables -I DOCKER-USER 1 ${base_cmd_part}"
         print_info "将执行: ${cmd_docker}"
         if ! eval ${cmd_docker}; then
             print_error "向 DOCKER-USER 链添加规则失败。"; press_enter_to_continue; return
@@ -170,20 +178,22 @@ function view_port_rules() {
     if [ "$IS_DOCKER_HOST" = true ]; then
         echo ""
         print_info "--- 当前由脚本管理的规则 (DOCKER-USER 链 - 容器) ---"
-        iptables -L DOCKER-USER -n --line-numbers | grep --color=never "${COMMENT_TAG}"
+        iptables -L DOCKER-USER -n --line-numbers | grep --color=never -E "${COMMENT_TAG}|default-deny-all"
     fi
     press_enter_to_continue
 }
 
 function _delete_rules_for_port_in_chain() {
-    local port="$1"
-    local proto="$2"
-    local chain="$3"
-    local mode="$4"
+    local port="\$1"
+    local proto="\$2"
+    local chain="\$3"
+    local mode="\$4"
     local all_deleted=true
 
-    iptables-save | grep -- "-A ${chain}" | grep -- "-p ${proto}" | grep -- "--dport ${port}" | grep -- "${COMMENT_TAG}" | while read -r rule; do
+    # 使用 eval 的健壮删除逻辑，兼容 -A 和 -I 规则
+    iptables-save | grep -- "-A ${chain}\|-I ${chain}" | grep -- "-p ${proto}" | grep -- "--dport ${port}" | grep -- "${COMMENT_TAG}" | while read -r rule; do
         local delete_command="iptables ${rule/-A/-D}"
+        delete_command=${delete_command/-I/-D}
         
         if [[ "$mode" != "silent" ]]; then
             print_info "将执行删除命令: ${delete_command}"
@@ -205,7 +215,7 @@ function delete_port_rule() {
     local ports_input=($(iptables-save | grep -- "-A INPUT" | grep "${COMMENT_TAG}" | grep -oP '(?<=--dport )\d+' | sort -u))
     local ports_docker=()
     if [ "$IS_DOCKER_HOST" = true ]; then
-        ports_docker=($(iptables-save | grep -- "-A DOCKER-USER" | grep "${COMMENT_TAG}" | grep -oP '(?<=--dport )\d+' | sort -u))
+        ports_docker=($(iptables-save | grep -- "-A DOCKER-USER\|-I DOCKER-USER" | grep "${COMMENT_TAG}" | grep -oP '(?<=--dport )\d+' | sort -u))
     fi
     local all_ports=($(echo "${ports_input[@]} ${ports_docker[@]}" | tr ' ' '\n' | sort -u))
 
@@ -290,24 +300,20 @@ function view_forwarding_rules() {
     press_enter_to_continue
 }
 
-# [已修复] 删除端口转发规则
 function delete_forwarding_rule() {
     print_info "--- 删除端口转发规则 ---"
     local menu_options=()
     local rule_comments=()
     
-    # 从 PREROUTING 链中读取规则来构建菜单
     while IFS= read -r rule; do
-        # 提取完整的 comment 内容作为唯一标识
         if [[ $rule =~ -m\ comment\ --comment\ \"(${COMMENT_TAG}:fwd:[^\"]+)\" ]]; then
             local comment_content=${BASH_REMATCH[1]}
-            # 解析 comment 内容用于用户友好的显示
             if [[ $comment_content =~ :fwd:([0-9]+):to:([^:]+):([0-9]+) ]]; then
                 local from_port=${BASH_REMATCH[1]}
                 local to_ip=${BASH_REMATCH[2]}
                 local to_port=${BASH_REMATCH[3]}
                 menu_options+=("转发: ${from_port} -> ${to_ip}:${to_port}")
-                rule_comments+=("${comment_content}") # 保存唯一的 comment
+                rule_comments+=("${comment_content}")
             fi
         fi
     done < <(iptables-save -t nat | grep -- "-A PREROUTING" | grep "${COMMENT_TAG}")
@@ -323,7 +329,6 @@ function delete_forwarding_rule() {
     select choice in "${menu_options[@]}"; do
         if [[ "$choice" == "返回" ]]; then break; fi
         if [ -n "$choice" ]; then
-            # 获取用户选择的规则对应的唯一 comment
             local comment_to_delete=${rule_comments[$((REPLY-1))]}
             
             print_warn "将要删除与此 comment 相关的所有转发规则: \"${comment_to_delete}\""
@@ -331,9 +336,7 @@ function delete_forwarding_rule() {
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 local all_deleted=true
                 
-                # 使用唯一的 comment 查找 nat 表中所有相关的规则（PREROUTING 和 OUTPUT）
                 iptables-save -t nat | grep -- "-m comment --comment \"${comment_to_delete}\"" | while read -r rule_to_delete; do
-                    # 将 -A 替换为 -D 来构造精确的删除命令
                     local delete_command="iptables -t nat ${rule_to_delete/-A/-D}"
                     print_info "正在执行: ${delete_command}"
                     if ! eval "${delete_command}"; then
@@ -409,7 +412,7 @@ function main_menu() {
         if [ "$IS_DOCKER_HOST" = true ]; then docker_status_text="${C_GREEN}已安装 (深度集成模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  iptables 智能管理脚本 v3.4 (Docker 集成 & 自动保存)  ${C_RESET}"
+        echo -e "${C_CYAN}  iptables 智能管理脚本 v4.1 (安全默认 & 深度集成)  ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " Docker 状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
