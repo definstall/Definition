@@ -1,16 +1,15 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v3.0 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v3.1 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 3.0
+# 版本: 3.1
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v3.0 更新日志 ---
+# --- v3.1 更新日志 ---
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
-#     - 修复 `awk` 脚本中正则表达式 `[` 和 `]` 的转义问题，确保它们在字符串字面量中被正确匹配。
-#     - 移除 `delete_port_rule` 管道中多余且错误的 `grep --color=never` 命令。
-#     - 优化 `awk` 内部的逻辑，更健壮地提取规则编号和注释内容。
+#     - 完全移除 `awk` 依赖，改用 `grep` 和 Bash 内置的正则表达式 (`[[ ... =~ ... ]]`) 进行解析。
+#     - 逻辑与 `delete_forwarding_rule` 函数保持一致，提高代码一致性和健壮性。
 #     - 现在可以可靠地列出并删除所有由脚本管理的 IPv4 端口规则。
 #   - [显示优化] `delete_port_rule` 列表现在只显示 IPv4 规则。
 #   - [显示优化] `view_port_rules` 列表现在显示所有由脚本管理的规则，包括 IPv4 和 IPv6。
@@ -322,7 +321,7 @@ function add_port_rule() {
 
 function view_port_rules() {
     print_info "--- 当前由脚本管理的 UFW 规则 (包括 IPv4 和 IPv6) ---"
-    # 修复：确保显示所有由脚本添加的规则 (包括默认和用户自定义的)，不再排除 IPv6
+    # 确保显示所有由脚本添加的规则 (包括默认和用户自定义的)，不再排除 IPv6
     # 使用 --color=never 确保输出没有颜色代码，方便 grep 和 awk 处理
     sudo ufw status numbered | grep --color=never "${COMMENT_TAG}:"
     press_enter_to_continue
@@ -333,57 +332,43 @@ function delete_port_rule() {
     local managed_rules=()
     local rule_numbers=()
     
-    # 收集由脚本管理的所有 IPv4 规则
-    # 关键修复：让 awk 直接处理去除颜色后的完整输出，并在 awk 内部完成所有过滤和解析
-    local awk_script='
-        BEGIN {
-            # tag 变量从 bash 传递进来
-            # 定义一个正则表达式模式，用于匹配注释标签，包括前面的 # 和可选的空格
-            comment_pattern = "# *" tag ":";
-        }
-        # 匹配以 "[数字]" 开头，不含 "(v6)"，并且包含我们注释标签的行
-        # 注意：这里 $0 ~ comment_pattern 确保了行中包含我们的注释
-        /^\\[[0-9]+\\]/ && !/\\(v6\\)/ && $0 ~ comment_pattern {
-            # 提取规则编号
-            # 匹配 [ 1] 或 [1] 这样的格式，并捕获数字
-            # 使用 match() 捕获数字，更健壮
-            if (match($0, /^\\\[ *([0-9]+)\\\]/, num_arr)) { # 修正：转义 [ 和 ]
-                rule_num = num_arr[1];
-            } else {
-                # 如果无法提取编号，则跳过此行
-                next;
-            }
+    # 获取 UFW 状态的原始输出，并进行初步过滤：
+    # 1. 过滤掉颜色代码 (ufw status numbered 通常在管道中不会输出颜色，但加上更安全)
+    # 2. 过滤出包含我们 COMMENT_TAG 的行
+    # 3. 过滤掉 IPv6 规则 (不包含 "(v6)")
+    local ufw_filtered_output
+    ufw_filtered_output=$(sudo ufw status numbered | grep --color=never "${COMMENT_TAG}:" | grep -v '(v6)')
 
-            # 提取注释内容 (从 # 后面开始，并移除前导空格)
-            # 找到 # 的位置
-            hash_pos = index($0, "#");
-            if (hash_pos > 0) {
-                # 提取 # 之后的所有内容
-                full_comment_part = substr($0, hash_pos + 1);
-                # 移除前导空格
-                sub(/^ */, "", full_comment_part);
-                
-                # 检查清理后的注释是否以我们的 COMMENT_TAG 开头
-                if (full_comment_part ~ "^" tag ":") {
-                    rule_comment_content = full_comment_part;
-                    # 打印提取到的编号和注释，用制表符分隔
-                    print rule_num "\t" rule_comment_content;
-                }
-            }
-        }
-    '
-    
-    # 将 ufw status numbered 的输出通过管道传递给 awk，并传递 COMMENT_TAG 变量
-    # 确保 awk 接收到纯净的文本，并且 awk 内部完成所有过滤
-    # 移除 `grep --color=never`，因为 `ufw status numbered` 管道到 awk 时通常不会有颜色，
-    # 且 `grep` 没有模式会导致其打印用法信息。
-    while IFS=$'\t' read -r rule_num rule_comment_content; do
-        # awk 已经完成了所有过滤和解析，这里只需确保成功提取到编号和内容
-        if [[ -n "$rule_num" && -n "$rule_comment_content" ]]; then
-            managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
-            rule_numbers+=("${rule_num}")
+    # 检查是否有任何规则被找到
+    if [ -z "$ufw_filtered_output" ]; then
+        print_warn "没有找到由本脚本管理的任何 IPv4 端口规则。"
+        press_enter_to_continue
+        return
+    fi
+
+    # 逐行读取过滤后的输出，并使用 Bash 正则表达式解析
+    while IFS= read -r line; do
+        # 正则表达式解释：
+        # ^\[ *: 匹配行首的 "[ " (注意空格和转义的方括号)
+        # ([0-9]+): 捕获规则编号 (一个或多个数字)
+        # \]: 匹配 "]"
+        # .*: 匹配中间的任意字符
+        # #: 匹配注释符号 "#"
+        # *: 匹配 # 后面的任意数量的空格
+        # (.*)$: 捕获从 COMMENT_TAG 开始到行尾的所有内容 (这是完整的注释)
+        if [[ "$line" =~ ^\[ *([0-9]+)\].*# *(.*)$ ]]; then
+            local rule_num="${BASH_REMATCH[1]}"
+            local rule_comment_content="${BASH_REMATCH[2]}"
+            
+            # 再次确认注释内容确实以我们的 COMMENT_TAG 开头
+            # 这一步是必要的，因为前面的 grep "${COMMENT_TAG}:" 只是匹配了行中包含该字符串，
+            # 但不能保证它就是注释的开头部分。
+            if [[ "$rule_comment_content" =~ ^${COMMENT_TAG}: ]]; then
+                managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
+                rule_numbers+=("${rule_num}")
+            fi
         fi
-    done < <(sudo ufw status numbered | awk -v tag="${COMMENT_TAG}" "$awk_script")
+    done <<< "$ufw_filtered_output" # 使用 here string 将变量内容作为输入
 
     if [ ${#managed_rules[@]} -eq 0 ]; then
         print_warn "没有找到由本脚本管理的任何 IPv4 端口规则。"
@@ -401,7 +386,7 @@ function delete_port_rule() {
             echo -n "确认删除吗? (y/N): "
             read confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                # 修复：自动确认删除
+                # 自动确认删除
                 local delete_output=$(echo "y" | sudo ufw delete "$selected_num" 2>&1)
                 if echo "$delete_output" | grep -q "Rule deleted"; then
                     print_success "规则 [${selected_num}] 已成功删除。"
@@ -631,7 +616,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v3.0 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v3.1 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
