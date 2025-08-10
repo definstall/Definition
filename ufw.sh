@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v2.2 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v2.3 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 2.2
+# 版本: 2.3
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v2.2 更新日志 ---
+# --- v2.3 更新日志 ---
 #   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
 #     - 采用更健壮的 `awk` 命令和 `gensub` 函数来解析 `ufw status numbered` 输出，
 #       精确提取规则编号和清理后的注释内容，解决了注释前空格导致的问题。
@@ -335,22 +335,16 @@ function delete_port_rule() {
     # 收集由脚本管理的所有 IPv4 规则
     # 使用 awk 进行更健壮的解析，并重新加入 IPv6 过滤
     local awk_script='
-        # 匹配以 "[数字]" 开头，不含 "(v6)"
-        /^\\[[0-9]+\\]/ && !/\\(v6\\)/ {
-            # 检查行中是否包含我们的注释标签
-            # 使用正则表达式匹配整个注释部分，包括 # 和其后的可选空格
-            if ($0 ~ /# *'"${COMMENT_TAG}"':/) {
-                # 提取规则编号
-                rule_num = gensub(/^\\[ *([0-9]+)\\].*/, "\\1", "1", $0);
+        BEGIN { FS = "#" } # 将 # 设置为字段分隔符
+        /^\\[[0-9]+\\]/ && !/\\(v6\\)/ && $2 ~ /'"${COMMENT_TAG}"':/ { # 匹配以 "[数字]" 开头，不含 "(v6)"，且注释部分包含我们的标签
+            # 提取规则编号
+            rule_num = gensub(/^\\[ *([0-9]+)\\].*/, "\\1", "1", $1);
 
-                # 提取注释内容 (从 # 后面开始，并移除前导空格)
-                # 匹配 # 后面所有内容，并确保以 COMMENT_TAG 开头
-                rule_comment_content = gensub(/.*# *('"${COMMENT_TAG}"':.*)$/, "\\1", "1", $0);
-                
-                # 打印提取到的编号和注释，用制表符分隔
-                # awk 已经确保了注释内容以 COMMENT_TAG 开头，所以这里不需要额外的 if
-                print rule_num "\t" rule_comment_content;
-            }
+            # 获取注释内容，并移除前导空格
+            rule_comment_content = $2;
+            sub(/^ */, "", rule_comment_content); # 移除所有前导空格
+
+            print rule_num "\t" rule_comment_content;
         }
     '
     
@@ -609,7 +603,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.2 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.3 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
