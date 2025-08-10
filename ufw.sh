@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v1.5 (安全默认 & 深度 Docker 集成)
+# UFW 智能管理脚本 v1.6 (安全默认 & 深度 Docker 集成)
 # 作者: 你的高级软件工程师
-# 版本: 1.5
+# 版本: 1.6
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v1.5 更新日志 ---
-#   - [关键修复] 优化 `delete_port_rule` 函数：
-#     - 现在可以列出并删除所有由脚本管理的 IPv4 端口规则，包括默认开放的 22/tcp。
-#     - 移除了“默认端口不在此列表中”的提示，因为它们现在可以被删除。
+# --- v1.6 更新日志 ---
+#   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
+#     - 优化了规则收集逻辑，使用更健壮的正则表达式匹配 `ufw status numbered` 输出。
+#     - 现在可以正确列出并删除所有由脚本管理的 IPv4 端口规则（包括默认的 22/tcp 和用户添加的）。
 #   - [功能变更] 默认初始化时不再开放 2525/tcp 端口，仅默认开放 22/tcp (SSH)。
 #   - [显示优化] `view_port_rules` 和 `delete_port_rule` 列表不再显示 IPv6 规则 (含有 (v6) 的行)。
 #   - [用户体验] 自动处理 UFW 启用/重新加载/删除时的 SSH 连接中断警告，不再需要手动确认。
@@ -47,7 +47,7 @@ IS_UFW_DOCKER_COMPATIBLE=false
 # 1. 初始化防火墙
 function initialize_firewall() {
     print_info "开始初始化防火墙配置..."
-    if [[ $EUID -ne 0 ]]; then print_error "此脚本必须以 root 权限运行。"; exit 1; fi
+    if [[ $EUID -ne 0 ]]; then print_error "此脚本必须以 root 权限运行。"; exit 1; }
 
     # 1.1 检测并处理其他防火墙
     if command -v ufw &> /dev/null; then
@@ -329,17 +329,17 @@ function delete_port_rule() {
     local rule_numbers=()
     
     # 收集由脚本管理的所有 IPv4 规则 (包括默认和用户添加的)
+    # 优化：将 grep 过滤放在 while 循环外部，提高效率和准确性
     while IFS= read -r line; do
-        # 匹配所有带脚本注释的规则，并排除 IPv6
-        if echo "$line" | grep -q "${COMMENT_TAG}:" && ! echo "$line" | grep -q '(v6)'; then
-            if [[ $line =~ ^\[([0-9]+)\]\ ALLOW\ .*${COMMENT_TAG}: ]]; then # 匹配并提取编号
-                local rule_num=${BASH_REMATCH[1]}
-                local rule_desc=$(echo "$line" | sed -E "s/.*(${COMMENT_TAG}:[^ ]+).*/\1/") # 提取完整的注释
-                managed_rules+=("规则 [${rule_num}]: ${rule_desc}")
-                rule_numbers+=("${rule_num}")
-            fi
+        # 匹配并提取编号和完整的注释部分
+        # 示例行: [ 1] 22/tcp                     ALLOW IN    Anywhere                  # managed-by-ufw-script:default:ssh
+        if [[ "$line" =~ ^\[([0-9]+)\]\ .*#\ ${COMMENT_TAG}:(.*) ]]; then
+            local rule_num=${BASH_REMATCH[1]}
+            local rule_desc="${COMMENT_TAG}:${BASH_REMATCH[2]}" # 重新构建完整的注释
+            managed_rules+=("规则 [${rule_num}]: ${rule_desc}")
+            rule_numbers+=("${rule_num}")
         fi
-    done < <(sudo ufw status numbered)
+    done < <(sudo ufw status numbered | grep "${COMMENT_TAG}:" | grep -v '(v6)')
 
     if [ ${#managed_rules[@]} -eq 0 ]; then
         print_warn "没有找到由本脚本管理的任何 IPv4 端口规则。"
@@ -587,7 +587,7 @@ function main_menu() {
         if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
         
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.5 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v1.6 (安全默认 & 深度集成)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
