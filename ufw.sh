@@ -327,39 +327,45 @@ function view_port_rules() {
     press_enter_to_continue
 }
 
+# 删除端口规则函数
 function delete_port_rule() {
     print_info "--- 删除端口规则 (仅显示 IPv4) ---"
     local managed_rules=()
     local rule_numbers=()
     
     # 收集由脚本管理的所有 IPv4 规则
-    # 使用 awk 进行更健壮的解析，并重新加入 IPv6 过滤
+    # 使用更简单的 awk 脚本解析 ufw status numbered 的输出
     local awk_script='
         # 匹配以 "[数字]" 开头，不含 "(v6)"
         /^\\[[0-9]+\\]/ && !/\\(v6\\)/ {
             # 检查行中是否包含我们的注释标签
-            # 使用正则表达式匹配整个注释部分，包括 # 和其后的可选空格
-            if ($0 ~ /# *'"${COMMENT_TAG}"':/) {
-                # 提取规则编号
-                rule_num = gensub(/^\\[ *([0-9]+)\\].*/, "\\1", "1", $0);
-
-                # 提取注释内容 (从 # 后面开始，并移除前导空格)
-                # 匹配 # 后面所有内容，并确保以 COMMENT_TAG 开头
-                rule_comment_content = gensub(/.*# *('"${COMMENT_TAG}"':.*)$/, "\\1", "1", $0);
+            if ($0 ~ /'"${COMMENT_TAG}"'/) {
+                # 提取规则编号 (第一列的 [数字]，去掉方括号)
+                rule_num = substr($1, 2, length($1)-2);
                 
-                # 打印提取到的编号和注释，用制表符分隔
-                # awk 已经确保了注释内容以 COMMENT_TAG 开头，所以这里不需要额外的 if
-                print rule_num "\t" rule_comment_content;
+                # 提取规则内容 (从第一个字段后的内容开始，直到行尾)
+                rule_content = $0;
+                sub(/^\\[[0-9]+\\][[:space:]]+/, "", rule_content);
+                
+                # 确保只处理包含 COMMENT_TAG 的规则
+                if (rule_content ~ /'"${COMMENT_TAG}"'/) {
+                    print rule_num "\t" rule_content;
+                }
             }
         }
     '
     
-    # 将 ufw status numbered 的输出通过管道传递给 awk，然后 awk 的输出再传递给 while read
-    while IFS=$'\t' read -r rule_num rule_comment_content; do
-        # awk 已经完成了大部分过滤和解析，这里只需确保成功提取到编号和内容
-        if [[ -n "$rule_num" && -n "$rule_comment_content" ]]; then
-            managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
-            rule_numbers+=("${rule_num}")
+    # 将 ufw status numbered 的输出通过管道传递给 awk
+    while IFS=$'\t' read -r rule_num rule_content; do
+        if [[ -n "$rule_num" && -n "$rule_content" ]]; then
+            # 从注释中提取端口、协议和来源 IP（如果存在）
+            if [[ $rule_content =~ ${COMMENT_TAG}:port:([0-9]+):([^:]+)(:from:([^[:space:]]+))? ]]; then
+                local port=${BASH_REMATCH[1]}
+                local proto=${BASH_REMATCH[2]}
+                local source_ip=${BASH_REMATCH[4]:-"任何IP"}
+                managed_rules+=("规则 [${rule_num}]: 端口 ${port}/${proto} (来源: ${source_ip})")
+                rule_numbers+=("${rule_num}")
+            fi
         fi
     done < <(sudo ufw status numbered | awk "$awk_script")
 
@@ -375,24 +381,33 @@ function delete_port_rule() {
         if [[ "$choice" == "返回" ]]; then break; fi
         if [ -n "$choice" ]; then
             local selected_num=${rule_numbers[$((REPLY-1))]}
-            print_warn "将要删除规则 [${selected_num}]: ${choice}"
+            print_warn "将要删除: ${choice}"
             echo -n "确认删除吗? (y/N): "
             read confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                # 修复：自动确认删除
+                # 执行删除操作并捕获输出
                 local delete_output=$(echo "y" | sudo ufw delete "$selected_num" 2>&1)
                 if echo "$delete_output" | grep -q "Rule deleted"; then
                     print_success "规则 [${selected_num}] 已成功删除。"
+                    # 重新加载 UFW 以确保规则生效
+                    print_info "正在重新加载 UFW 规则..."
+                    echo "y" | sudo ufw reload || { print_error "UFW 重新加载失败！请检查规则状态。"; press_enter_to_continue; return; }
                 else
-                    print_error "删除规则失败。输出: ${delete_output}"; fi
+                    print_error "删除规则失败。输出: ${delete_output}"
+                fi
             else
-                print_info "操作已取消。"; fi
+                print_info "操作已取消。"
+            fi
         else
-            print_error "无效选项。"; fi
+            print_error "无效选项。"
+        fi
         break
     done
     press_enter_to_continue
 }
+
+# --- 省略其他未修改部分 ---
+ 
 
 # 3. 端口转发 (NAT) 管理
 function manage_forwarding() {
