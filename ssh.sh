@@ -1,18 +1,28 @@
 #!/bin/bash
 
 # ==============================================================================
-# SSH 终极安全加固脚本 (仅限密钥登录，root 密码始终锁定)
+# SSH 终极安全加固脚本 (直接覆盖配置，仅限密钥登录，root 密码始终锁定)
+#
 # 功能:
 # 1. 强制锁定 root 账户密码，禁止 root 通过任何密码方式登录 (包括 SSH 和 XRDP)。
+#    (注意：后期可手动设置 root 密码，届时 root 将能通过 XRDP 密码登录，
+#     但 SSH 仍将仅限密钥登录。)
 # 2. 配置 root 的 SSH 公钥作为唯一 SSH 登录方式。
-# 3. 强制 SSH 服务只接受密钥认证，完全禁止密码认证。
-# 4. 非覆盖式修改 sshd_config，保留现有配置，仅修改或添加指定安全项。
+# 3. 直接覆盖 /etc/ssh/sshd_config 文件，应用一套安全的配置。
+#    (会先备份原始文件，并尝试保留原端口和HostKey配置)
+# 4. 强制 SSH 服务只接受密钥认证，完全禁止密码认证。
 # 5. 隐藏所有过程性输出，除非出错。
+#
+# 使用前请务必确认 PUBLIC_KEY 变量为您的正确公钥！
 # ==============================================================================
 
 # --- 配置变量 ---
-# 你的公钥 (这是唯一的入口，请确保无误)
-PUBLIC_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQD2X571eCyO2O9wdX/aT/oZL+ZNG1/jd2u7u9LslKeiy8x1AFTM95xjqq7DEBJZ8X1f8e/Td7d5XY/c1v/1WP40ehEGLVMSJ5nNmPgQpcFETFKRrvWptdjJ20rppynlRHBpocLN4oRJ13RkrPCyZKs+7a33xBujH9QjQv3UF558oCN61WGJd1//wSIhEqIYELfjN7dNzujg1wBpZ4ACzkiqgZdu6vMw7cIihF8EMXKCtIJbAGB7yYQSgmKeKnUES9ZeUhc7lfYQWIgeuaVpNzKGxt767AGVwT8UO+6LZWGh9C7tD8RDqGtWwWJYcmOGr393Q7jR0CurJBQVMHpnROZ5 ssh-key-2022-11-08"
+# !!! 您的 SSH 公钥 !!!
+# 请务必将其替换为您本地私钥对应的完整公钥字符串。
+# 示例: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC... user@hostname
+# 您可以通过 'ssh-keygen -y -f /path/to/your/private_key' 命令获取。
+PUBLIC_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQD2X571eCyO2O9wdX/aT/oZL+ZNG1/jd2u7u9LslKeiy8x1AFTM95xjqq7DEBJZ8X1f8e/Td7d5XY/c1v/1WP40ehEGLVMSJ5nNmPgQpcFETFKRrvWptdjJ20rppynlRHBpocLN4oRJ13RkrPCyZKs+7a53xBujH9QjQv3UF558oCN61WGJd1//wSIhEqIYELfjN7dNzujg1wBpZ4ACzkiqgZdu6vMw7cIihF8EMXKCtIJbAGB7yYQSgmKeKnUES9ZeUhc7lfYQWIgeuaVpNzKGxt767AGVwT8UO+6LZWGh9C7tD8RDqGtWwWJYcmOGr393Q7jR0CurJBQVMHpnROZ5 ssh-key-2022-11-08"
+
 SSHD_CONFIG_FILE="/etc/ssh/sshd_config"
 BACKUP_FILE="${SSHD_CONFIG_FILE}.bak_$(date +%s)"
 
@@ -35,41 +45,26 @@ handle_error() {
     exit 1
 }
 
-# 函数：设置或更新 sshd_config 中的参数
-# 如果参数存在（无论是否注释），则更新其值并取消注释。
-# 如果参数不存在，则添加到文件末尾。
-# Usage: set_sshd_config_param "ParameterName" "Value"
-set_sshd_config_param() {
-    local param="$1"
-    local value="$2"
-    local config_file="$SSHD_CONFIG_FILE"
-
-    # Escape value for sed to handle special characters like / &
-    local escaped_value=$(echo "$value" | sed 's/[\/&]/\\&/g')
-
-    # Check if the parameter exists (active or commented out)
-    if grep -qE "^#?\s*${param}\s+" "$config_file"; then
-        # Parameter exists, update it and ensure it's not commented
-        # Use a temporary file for sed to avoid issues with in-place editing
-        sed -i.bak_tmp -E "s/^#?\s*(${param})\s+.*$/\1 ${escaped_value}/" "$config_file"
-        rm "${config_file}.bak_tmp" # Clean up sed's temporary backup
-        echo "  - 已更新/设置: ${param} ${value}"
-    else
-        # Parameter does not exist, add it to the end of the file
-        echo "${param} ${value}" >> "$config_file"
-        echo "  - 已添加: ${param} ${value}"
-    fi
-}
-
 # --- 脚本开始 ---
 
 echo "=============================================================================="
-echo "                 SSH 终极安全加固脚本 (仅限密钥登录)"
+echo "                 SSH 终极安全加固脚本 (直接覆盖配置)"
 echo "=============================================================================="
 
 # 检查是否以 root 身份运行
 if [[ $EUID -ne 0 ]]; then
    handle_error "此脚本必须以 root 身份运行。"
+fi
+
+echo ""
+echo "警告：此脚本将直接覆盖 ${SSHD_CONFIG_FILE} 文件！"
+echo "      请务必确保脚本中的 PUBLIC_KEY 变量是您正确的 SSH 公钥！"
+echo "      如果公钥错误，您将无法通过 SSH 登录服务器！"
+read -p "是否继续执行？(y/N): " -n 1 -r
+echo ""
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "脚本已取消。"
+    exit 0
 fi
 
 echo ""
@@ -91,8 +86,8 @@ echo "2. 正在配置 root 的 SSH 公钥..."
 } &> /dev/null || handle_error "配置 root 公钥失败。"
 echo "   ✅ root SSH 公钥已配置。"
 
-# 步骤 3: 修改 SSHD 配置文件
-echo "3. 正在修改 SSHD 配置文件 (${SSHD_CONFIG_FILE})..."
+# 步骤 3: 备份并覆盖 SSHD 配置文件
+echo "3. 正在备份并覆盖 SSHD 配置文件 (${SSHD_CONFIG_FILE})..."
 
 # 创建备份文件
 cp "${SSHD_CONFIG_FILE}" "${BACKUP_FILE}" &> /dev/null || handle_error "创建备份文件失败。"
@@ -103,26 +98,55 @@ CURRENT_PORT=$(grep -i '^Port' "${SSHD_CONFIG_FILE}" | awk '{print $2}' | tail -
 [ -z "${CURRENT_PORT}" ] && CURRENT_PORT="22"
 echo "   - 检测到当前 SSH 端口为: ${CURRENT_PORT}"
 
-echo "   - 正在应用安全配置项..."
-set_sshd_config_param "Port" "${CURRENT_PORT}"
-set_sshd_config_param "Protocol" "2"
-set_sshd_config_param "PubkeyAuthentication" "yes"
-set_sshd_config_param "PasswordAuthentication" "no" # 强制 SSH 不接受密码登录 (对所有用户生效)
-set_sshd_config_param "KbdInteractiveAuthentication" "no"
-set_sshd_config_param "ChallengeResponseAuthentication" "no"
-set_sshd_config_param "PermitRootLogin" "prohibit-password" # 允许 root SSH 登录，但仅限密钥
-set_sshd_config_param "PermitEmptyPasswords" "no"
-set_sshd_config_param "MaxAuthTries" "3"
-set_sshd_config_param "LoginGraceTime" "30s"
-set_sshd_config_param "X11Forwarding" "no"
-set_sshd_config_param "ClientAliveInterval" "300"
-set_sshd_config_param "ClientAliveCountMax" "2"
-set_sshd_config_param "UsePAM" "yes"
-set_sshd_config_param "PrintMotd" "no"
-set_sshd_config_param "AcceptEnv" "LANG LC_*"
-set_sshd_config_param "Subsystem" "sftp /usr/lib/openssh/sftp-server"
+# 从现有配置中提取 HostKey 配置，以确保 SSH 服务能够启动
+# 查找所有以 "HostKey" 开头且不被注释的行
+HOST_KEYS=$(grep -E '^\s*HostKey\s+' "${SSHD_CONFIG_FILE}" | grep -v '^\s*#')
+if [ -z "${HOST_KEYS}" ]; then
+    echo "警告：未在原始配置文件中找到有效的 HostKey 配置。将使用常见默认路径。" >&2
+    HOST_KEYS="# Default HostKeys (adjust if your system uses different paths)\nHostKey /etc/ssh/ssh_host_rsa_key\nHostKey /etc/ssh/ssh_host_ecdsa_key\nHostKey /etc/ssh/ssh_host_ed25519_key"
+fi
 
-echo "   ✅ SSHD 配置文件修改完成。"
+echo "   - 正在生成新的 SSHD 配置文件..."
+cat <<EOF > "$SSHD_CONFIG_FILE"
+# This is a new sshd_config generated by the security script.
+# Original file backed up to ${BACKUP_FILE}
+
+# Port configuration (extracted from original config)
+Port ${CURRENT_PORT}
+
+# Protocol version
+Protocol 2
+
+# HostKeys (extracted from original config or common defaults)
+${HOST_KEYS}
+
+# Authentication:
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitRootLogin prohibit-password
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+UsePAM yes
+PermitUserEnvironment no # Prevents users from setting environment variables that could be exploited
+
+# Other security settings:
+MaxAuthTries 3
+LoginGraceTime 30s
+X11Forwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 2
+TCPKeepAlive yes # Keep SSH connection alive
+Compression no # Generally recommended for security/performance unless specifically needed
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
+
+# Add any other specific configurations here if needed.
+# For example, if you had specific Match blocks or other directives,
+# you would need to add them manually to this template.
+EOF
+echo "   ✅ 新的 SSHD 配置文件已生成并覆盖原文件。"
 
 # 步骤 4: 验证配置并重启 SSH 服务
 echo "4. 正在验证新的 SSH 配置语法..."
@@ -144,6 +168,8 @@ echo "==========================================================================
 echo "### ✅ SSH 安全配置完成！ ###"
 echo "请使用您的 SSH 密钥登录 root 用户。"
 echo "root 密码已锁定，无法通过密码登录任何服务 (包括 SSH 和 XRDP)。"
+echo "如果您需要通过 XRDP 密码登录 root，请在脚本运行后手动执行 'sudo passwd root' 设置密码。"
+echo "但请注意，直接使用 root 账户进行图形界面操作存在安全风险，建议使用专用普通用户。"
 echo "如果您需要通过 XRDP 登录，请确保您有其他普通用户账户，并为其设置密码。"
 echo "=============================================================================="
 
