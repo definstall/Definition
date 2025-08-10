@@ -335,20 +335,21 @@ function delete_port_rule() {
     # 收集由脚本管理的所有 IPv4 规则
     # 使用 awk 进行更健壮的解析，并重新加入 IPv6 过滤
     local awk_script='
-        /^\\[[0-9]+\\]/ && !/\\(v6\\)/ { # 匹配以 "[数字]" 开头，不含 "(v6)"
+        # 匹配以 "[数字]" 开头，不含 "(v6)"
+        /^\\[[0-9]+\\]/ && !/\\(v6\\)/ {
             # 检查行中是否包含我们的注释标签
+            # 使用正则表达式匹配整个注释部分，包括 # 和其后的可选空格
             if ($0 ~ /# *'"${COMMENT_TAG}"':/) {
                 # 提取规则编号
                 rule_num = gensub(/^\\[ *([0-9]+)\\].*/, "\\1", "1", $0);
 
                 # 提取注释内容 (从 # 后面开始，并移除前导空格)
-                # 使用 gensub 提取 # 后面直到行尾的内容，并移除前导空格
-                rule_comment_content = gensub(/.*# *(.*)$/, "\\1", "1", $0);
+                # 匹配 # 后面所有内容，并确保以 COMMENT_TAG 开头
+                rule_comment_content = gensub(/.*# *('"${COMMENT_TAG}"':.*)$/, "\\1", "1", $0);
                 
-                # 再次确认提取到的注释内容以 COMMENT_TAG 开头
-                if (rule_comment_content ~ /^'"${COMMENT_TAG}"':/) {
-                    print rule_num "\t" rule_comment_content;
-                }
+                # 打印提取到的编号和注释，用制表符分隔
+                # awk 已经确保了注释内容以 COMMENT_TAG 开头，所以这里不需要额外的 if
+                print rule_num "\t" rule_comment_content;
             }
         }
     '
