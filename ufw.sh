@@ -8,9 +8,10 @@
 #
 # --- v1.5 更新日志 ---
 #   - [关键修复] 优化 `delete_port_rule` 函数：
-#     - 现在可以列出并删除所有由脚本管理的端口规则，包括默认开放的 22/tcp。
+#     - 现在可以列出并删除所有由脚本管理的 IPv4 端口规则，包括默认开放的 22/tcp。
 #     - 移除了“默认端口不在此列表中”的提示，因为它们现在可以被删除。
 #   - [功能变更] 默认初始化时不再开放 2525/tcp 端口，仅默认开放 22/tcp (SSH)。
+#   - [显示优化] `view_port_rules` 和 `delete_port_rule` 列表不再显示 IPv6 规则 (含有 (v6) 的行)。
 #   - [用户体验] 自动处理 UFW 启用/重新加载/删除时的 SSH 连接中断警告，不再需要手动确认。
 #   - [用户体验] 修复 `read -p` 中颜色代码显示为乱码的问题，将彩色文本与 `read` 提示分离。
 #   - [关键修复] 增强 `ufw enable` 和 `ufw reload` 的健壮性检查，确保防火墙规则正确加载。
@@ -292,8 +293,8 @@ function add_port_rule() {
     # UFW allow 命令是幂等的，重复执行不会创建重复规则，但为了清晰和修改规则，先删除旧的再添加新的。
     # 查找并删除所有匹配该端口、协议和来源IP的规则
     print_info "正在检查并删除端口 ${port}/${proto} (来源: ${source_ip:-所有IP}) 的旧规则..."
-    # 改进 grep 模式，确保匹配到正确的注释
-    local existing_rules=$(sudo ufw status numbered | grep -E "${COMMENT_TAG}:port:${port}:${proto}(:from:${source_ip})?$" | awk '{print $1}' | sed 's/\[//;s/\]//' | sort -nr)
+    # 改进 grep 模式，确保匹配到正确的注释，并排除 IPv6
+    local existing_rules=$(sudo ufw status numbered | grep -E "${COMMENT_TAG}:port:${port}:${proto}(:from:${source_ip})?$" | grep -v '(v6)' | awk '{print $1}' | sed 's/\[//;s/\]//' | sort -nr)
     for num in $existing_rules; do
         print_info "正在删除规则 [${num}]..."
         echo "y" | sudo ufw delete "$num" > /dev/null
@@ -316,29 +317,32 @@ function add_port_rule() {
 }
 
 function view_port_rules() {
-    print_info "--- 当前由脚本管理的 UFW 规则 ---"
-    # 修复：确保显示所有由脚本添加的规则 (包括默认和用户自定义的)
-    sudo ufw status numbered | grep --color=never "${COMMENT_TAG}:"
+    print_info "--- 当前由脚本管理的 UFW 规则 (仅显示 IPv4) ---"
+    # 修复：确保显示所有由脚本添加的规则 (包括默认和用户自定义的)，并排除 IPv6
+    sudo ufw status numbered | grep --color=never "${COMMENT_TAG}:" | grep -v '(v6)'
     press_enter_to_continue
 }
 
 function delete_port_rule() {
-    print_info "--- 删除端口规则 ---"
+    print_info "--- 删除端口规则 (仅显示 IPv4) ---"
     local managed_rules=()
     local rule_numbers=()
     
-    # 收集由脚本管理的所有规则 (包括默认和用户添加的)
+    # 收集由脚本管理的所有 IPv4 规则 (包括默认和用户添加的)
     while IFS= read -r line; do
-        if [[ $line =~ ^\[([0-9]+)\]\ ALLOW\ .*${COMMENT_TAG}: ]]; then # 匹配所有带脚本注释的规则
-            local rule_num=${BASH_REMATCH[1]}
-            local rule_desc=$(echo "$line" | sed -E "s/.*(${COMMENT_TAG}:[^ ]+).*/\1/") # 提取完整的注释
-            managed_rules+=("规则 [${rule_num}]: ${rule_desc}")
-            rule_numbers+=("${rule_num}")
+        # 匹配所有带脚本注释的规则，并排除 IPv6
+        if echo "$line" | grep -q "${COMMENT_TAG}:" && ! echo "$line" | grep -q '(v6)'; then
+            if [[ $line =~ ^\[([0-9]+)\]\ ALLOW\ .*${COMMENT_TAG}: ]]; then # 匹配并提取编号
+                local rule_num=${BASH_REMATCH[1]}
+                local rule_desc=$(echo "$line" | sed -E "s/.*(${COMMENT_TAG}:[^ ]+).*/\1/") # 提取完整的注释
+                managed_rules+=("规则 [${rule_num}]: ${rule_desc}")
+                rule_numbers+=("${rule_num}")
+            fi
         fi
     done < <(sudo ufw status numbered)
 
     if [ ${#managed_rules[@]} -eq 0 ]; then
-        print_warn "没有找到由本脚本管理的任何端口规则。"
+        print_warn "没有找到由本脚本管理的任何 IPv4 端口规则。"
         press_enter_to_continue
         return
     fi
@@ -354,10 +358,11 @@ function delete_port_rule() {
             read confirm
             if [[ "$confirm" =~ ^[Yy]$ ]]; then
                 # 修复：自动确认删除
-                if echo "y" | sudo ufw delete "$selected_num"; then
+                local delete_output=$(echo "y" | sudo ufw delete "$selected_num" 2>&1)
+                if echo "$delete_output" | grep -q "Rule deleted"; then
                     print_success "规则 [${selected_num}] 已成功删除。"
                 else
-                    print_error "删除规则失败。"; fi
+                    print_error "删除规则失败。输出: ${delete_output}"; fi
             else
                 print_info "操作已取消。"; fi
         else
@@ -481,7 +486,7 @@ function delete_forwarding_rule() {
             print_error "无效选项。"; fi
         break
     done
-    press_enter_continue
+    press_enter_to_continue
 }
 
 # 4. 负载均衡/轮询功能 (不实现，提供建议)
