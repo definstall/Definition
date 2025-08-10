@@ -18,6 +18,7 @@ urls=(
     "===================="
     "https://raw.githubusercontent.com/definstall/Definition/local/ssh.sh SSH脚本"
     "https://raw.githubusercontent.com/definstall/Definition/local/fail2ban.sh Fail2ban脚本"
+     "https://raw.githubusercontent.com/definstall/Definition/local/ufw.sh ufw防火墙"
     "===================="
     "https://raw.githubusercontent.com/definstall/Definition/local/nginx.sh Nginx_脚本"
     "https://raw.githubusercontent.com/definstall/Definition/local/xrdps.sh Kubuntu桌面"
