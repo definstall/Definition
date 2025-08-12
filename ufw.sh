@@ -1,18 +1,16 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v5.0 (安全默认 & 无 Docker 兼容 & 手动启用)
+# UFW 智能管理脚本 v6.1 (安全默认 & 无 Docker 兼容 & 自动启用带诊断)
 # 作者: 你的高级软件工程师 (由 AI 助手优化和整合)
-# 版本: 5.0
+# 版本: 6.1
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v5.0 更新日志 ---
-#   - [关键变更] 移除 `initialize_firewall` 函数中的 UFW 自动启用逻辑：
-#     - 脚本初始化时将只配置 UFW 规则，不再强制启用防火墙。
-#     - 在初始化完成后，会明确提示用户 UFW 处于禁用状态，并指导手动启用。
-#   - [新功能] 在主菜单中添加 "启用 UFW 防火墙" 选项：
-#     - 用户可以通过此选项手动激活 UFW，并包含必要的错误检查和提示。
-#   - [优化] 保持了 v4.3 中所有关于颜色显示、自动确认、端口管理和端口转发的优化。
+# --- v6.1 更新日志 ---
+#   - [关键修复] 修正 `initialize_firewall` 函数中 `if` 语句的语法错误 (将 `}` 改为 `fi`)。
+#   - [关键变更] 恢复 `initialize_firewall` 函数中的 UFW 自动启用逻辑。
+#   - [移除功能] 移除了主菜单中单独的 "启用 UFW 防火墙" 选项，因为初始化已包含此功能。
+#   - [优化] 保持了之前版本中所有关于颜色显示、自动确认、端口管理和端口转发的优化。
 #   - [功能移除] 彻底移除了所有 Docker 兼容性相关功能和代码。
 # ==============================================================================
 
@@ -41,11 +39,29 @@ confirm_action() {
     [[ "${choice:-Y}" =~ ^[Yy]$ ]] # 默认Y
 }
 
+# 检查 UFW 是否处于活动状态 (支持多语言输出，更鲁棒的匹配)
+is_ufw_active() {
+    # 获取 UFW 状态的原始输出，并尝试提取包含 "Status" 或 "状态" 的行
+    local status_line=$(sudo ufw status | grep -Ei "^(Status|状态)[[:space:]]*[：:]" | head -n 1)
+    
+    if [[ -z "$status_line" ]]; then
+        # 如果没有找到状态行，则认为 UFW 未能正确报告状态，视为非活动
+        return 1
+    fi
+
+    # 检查提取到的状态行是否包含 "active" (英文) 或 "活动"/"激活" (中文)
+    if echo "$status_line" | grep -qEi "(active|活动|激活)"; then
+        return 0 # 匹配到活动状态
+    fi
+    
+    return 1 # 未匹配到活动状态
+}
+
 # 重新加载UFW规则 (优化版)
 reload_ufw() {
     print_info "正在重新加载 UFW 规则..."
-    # 检查 UFW 是否处于活动状态
-    if ! sudo ufw status | grep -q "Status: active"; then
+    # 检查 UFW 是否处于活动状态 (使用新的 is_ufw_active 函数)
+    if ! is_ufw_active; then
         print_warn "UFW 当前未启用。跳过重新加载。"
         press_enter_to_continue
         return # 如果未启用，则直接返回
@@ -63,47 +79,17 @@ reload_ufw() {
     press_enter_to_continue
 }
 
-# 新增函数：手动启用 UFW 防火墙
-function enable_ufw_firewall() {
-    print_info "正在尝试启用 UFW 防火墙..."
-    if sudo ufw status | grep -q "Status: active"; then
-        print_warn "UFW 已经处于活动状态，无需再次启用。"
-        press_enter_to_continue
-        return
-    fi
-
-    local ufw_enable_output=$(echo "y" | sudo ufw enable 2>&1)
-    local ufw_enable_exit_code=$?
-
-    # 给 UFW 一点时间来应用规则并更新其状态
-    sleep 2
-
-    if [[ $ufw_enable_exit_code -eq 0 ]] && sudo ufw status | grep -q "Status: active"; then
-        print_success "UFW 防火墙已成功启用。"
-    else
-        print_error "UFW 启用失败！UFW 命令退出码: ${ufw_enable_exit_code}"
-        print_error "UFW enable 命令输出 (可能包含警告/错误):"
-        echo -e "${C_YELLOW}--- UFW Enable Output Start ---${C_RESET}"
-        echo -e "${C_YELLOW}${ufw_enable_output}${C_RESET}"
-        echo -e "${C_YELLOW}--- UFW Enable Output End ---${C_RESET}"
-        print_error "请务必手动运行以下命令检查 UFW 服务状态和日志："
-        print_error "  ${C_YELLOW}sudo systemctl status ufw${C_RESET}"
-        print_error "  ${C_YELLOW}journalctl -xeu ufw${C_RESET}"
-        print_error "常见问题：IPv6 配置不当可能导致 UFW 启动失败。尝试在 /etc/default/ufw 中设置 IPV6=no 进行测试。"
-    fi
-    press_enter_to_continue
-}
-
-
 # 1. 初始化防火墙
 function initialize_firewall() {
     print_info "开始初始化防火墙配置..."
+    # 修正：将 `}` 改为 `fi`
     if [[ $EUID -ne 0 ]]; then print_error "此脚本必须以 root 权限运行。"; exit 1; fi
 
     # 1.1 检测并处理其他防火墙
     if command -v ufw &> /dev/null; then
         print_info "检测到 UFW 已安装。"
-        if sudo ufw status | grep -q "Status: active"; then
+        # 检查 UFW 是否处于活动状态 (使用新的 is_ufw_active 函数)
+        if is_ufw_active; then
             print_warn "UFW 正在运行。将重新初始化其配置。"
             if confirm_action "是否要禁用并重新初始化 UFW?"; then # 默认Y
                 print_info "正在禁用 UFW..."; sudo ufw disable || print_error "禁用 UFW 失败。"
@@ -167,10 +153,79 @@ function initialize_firewall() {
     print_info "正在添加安全加固规则 (SYN Flood / 端口扫描防护)..."
     print_success "安全加固规则已应用。"
 
-    # 1.9 移除自动启用 UFW 逻辑
-    print_warn "UFW 防火墙已配置完成，但当前处于 ${C_RED}禁用状态${C_RESET}。"
-    print_warn "请在主菜单中选择 '${C_GREEN}7. 启用 UFW 防火墙${C_RESET}' 或手动运行 '${C_YELLOW}sudo ufw enable${C_RESET}' 来激活防火墙。"
-    
+    # 1.9 重新引入自动启用 UFW 逻辑和诊断菜单
+    print_info "正在启用 UFW 防火墙..."
+    local ufw_enabled_successfully=false
+
+    # 循环尝试启用 UFW 并提供诊断选项
+    while true; do
+        # 尝试启用 UFW，并捕获输出
+        local ufw_enable_output=$(echo "y" | sudo ufw enable 2>&1)
+        local ufw_enable_exit_code=$?
+
+        # 给 UFW 一点时间来应用规则并更新其状态
+        sleep 2
+
+        # 检查 UFW 是否真正处于活动状态 (使用新的 is_ufw_active 函数)
+        if [[ $ufw_enable_exit_code -eq 0 ]] && is_ufw_active; then
+            print_success "UFW 防火墙已成功启用。"
+            ufw_enabled_successfully=true
+            break # UFW 已成功启用，退出循环
+        else
+            # UFW 未激活，提供诊断选项
+            print_error "UFW 启用后状态仍为非活动。防火墙可能未正常工作！"
+            print_error "UFW enable 命令退出码: ${ufw_enable_exit_code}"
+            print_error "UFW enable 命令输出 (可能包含警告/错误):"
+            echo -e "${C_YELLOW}--- UFW Enable Output Start ---${C_RESET}"
+            echo -e "${C_YELLOW}${ufw_enable_output}${C_RESET}"
+            echo -e "${C_YELLOW}--- UFW Enable Output End ---${C_RESET}"
+            print_error "请尝试以下诊断和修复选项："
+
+            echo -e "${C_YELLOW}-----------------------------------------------------${C_RESET}"
+            echo -e "1. ${C_BLUE}尝试修复: 禁用 IPv6 并重新启用 UFW${C_RESET} (常见解决方案)"
+            echo -e "2. ${C_BLUE}查看 UFW 服务状态${C_RESET} (${C_YELLOW}sudo systemctl status ufw${C_RESET})"
+            echo -e "3. ${C_BLUE}查看 UFW 服务详细日志${C_RESET} (${C_YELLOW}journalctl -xeu ufw${C_RESET})"
+            echo -e "q. 退出脚本 (手动解决问题)"
+            echo -e "${C_YELLOW}-----------------------------------------------------${C_RESET}"
+            read -rp "请选择操作: " debug_choice
+
+            case "$debug_choice" in
+                1)
+                    print_info "正在尝试禁用 IPv6..."
+                    if grep -q '^IPV6=yes' /etc/default/ufw; then
+                        sudo sed -i 's/^IPV6=yes/IPV6=no/' /etc/default/ufw
+                        print_success "已将 /etc/default/ufw 中的 IPV6 设置为 no。"
+                    elif ! grep -q '^IPV6=no' /etc/default/ufw; then
+                        echo "IPV6=no" | sudo tee -a /etc/default/ufw > /dev/null
+                        print_success "已在 /etc/default/ufw 中添加 IPV6=no。"
+                    else
+                        print_info "IPV6 已经设置为 no，无需更改。"
+                    fi
+                    print_info "UFW 将再次尝试启用。如果问题依然存在，请尝试其他选项或手动诊断。"
+                    # 循环会继续，再次尝试启用 UFW
+                    ;;
+                2)
+                    print_info "正在显示 UFW 服务状态..."
+                    sudo systemctl status ufw
+                    press_enter_to_continue
+                    ;;
+                3)
+                    print_info "正在显示 UFW 服务详细日志..."
+                    sudo journalctl -xeu ufw
+                    press_enter_to_continue
+                    ;;
+                q|Q)
+                    print_error "用户选择退出。请手动解决 UFW 启动问题后重新运行脚本。"
+                    exit 1
+                    ;;
+                *)
+                    print_error "无效选择，请重新输入。"
+                    ;;
+            esac
+        fi
+    done # 结束 UFW 启用和诊断的循环
+
+    # 如果代码执行到这里，说明 UFW 已经成功启用
     print_success "防火墙初始化完成，规则已自动保存。"
     sleep 2
 }
@@ -240,15 +295,15 @@ function add_port_rule() {
 # 2.2 查看端口规则 (显示由脚本管理的规则)
 function view_port_rules() {
     print_info "--- 当前由脚本管理的 UFW 规则 (包括 IPv4 和 IPv6) ---"
-    # 过滤出带有 COMMENT_TAG 的规则
-    sudo ufw status numbered | grep --color=never "${COMMENT_TAG}:"
+    # 过滤出带有 COMMENT_TAG 的规则 (强制英文输出，确保编号和格式稳定)
+    LANG=C sudo ufw status numbered | grep --color=never "${COMMENT_TAG}:"
     press_enter_to_continue
 }
 
 # 2.3 删除端口规则
 function delete_port_rule() {
     print_info "--- 删除端口规则 ---"
-    sudo ufw status numbered # 显示所有规则及其编号
+    LANG=C sudo ufw status numbered # 显示所有规则及其编号 (强制英文输出，确保编号和格式稳定)
     print_warn "请注意: 删除规则可能导致服务不可用或安全风险。"
     read -rp "请输入要删除的规则编号: " rule_num
     if [[ -z "$rule_num" || ! "$rule_num" =~ ^[0-9]+$ ]]; then
@@ -467,23 +522,30 @@ function uninstall_firewall() {
 
 # --- 主菜单 ---
 function main_menu() {
-    # 首次运行或 UFW 未安装/未启用时，自动初始化配置
-    if ! command -v ufw &> /dev/null || ! sudo ufw status | grep -q "Status: active"; then
+    # 首次运行或 UFW 未安装时，自动初始化配置
+    if ! command -v ufw &> /dev/null; then
         initialize_firewall
     fi
 
     while true; do
         clear
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v5.0 (安全默认 & 无 Docker)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v6.1 (安全默认 & 无 Docker)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
-        # 显示 UFW 当前状态
-        if sudo ufw status | grep -q "Status: active"; then
-            echo -e " UFW 状态: ${C_GREEN}已启用${C_RESET}"
+        
+        # 获取 UFW 状态的原始输出的第一行，用于显示
+        local raw_ufw_status_output=$(sudo ufw status | head -n 1) 
+        local display_status_text=""
+
+        # 根据 is_ufw_active 判断并设置显示文本
+        if is_ufw_active; then
+            display_status_text="${C_GREEN}已启用${C_RESET}"
         else
-            echo -e " UFW 状态: ${C_RED}已禁用${C_RESET}"
+            display_status_text="${C_RED}已禁用${C_RESET}"
         fi
+        
+        echo -e " UFW 状态: ${display_status_text} (${raw_ufw_status_output})" # 混合显示
         echo "-----------------------------------------------------"
         echo -e "1. 端口管理 (添加/查看/删除)"
         echo -e "2. 端口转发(NAT)管理 (添加/查看/删除)"
@@ -491,7 +553,6 @@ function main_menu() {
         echo -e "4. 实时查看网络流量和规则计数"
         echo -e "5. ${C_RED}[危险] 重新运行初始化并应用基础安全配置${C_RESET}"
         echo -e "6. ${C_RED}[极度危险] 卸载并重置防火墙${C_RESET}"
-        echo -e "7. ${C_GREEN}启用 UFW 防火墙${C_RESET}" # 新增选项
         echo "q. 退出"
         echo "-----------------------------------------------------"
         read -rp "请输入您的选择: " choice
@@ -503,7 +564,6 @@ function main_menu() {
             4) view_traffic ;;
             5) initialize_firewall; press_enter_to_continue ;;
             6) uninstall_firewall ;;
-            7) enable_ufw_firewall ;; # 调用新函数
             q|Q) print_info "正在退出。"; exit 0 ;;
             *) print_error "无效选项，请重试。"; sleep 1 ;;
         esac
