@@ -1,27 +1,18 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v2.9 (安全默认 & 深度 Docker 集成)
-# 作者: 你的高级软件工程师
-# 版本: 2.9
+# UFW 智能管理脚本 v4.0 (安全默认 & 无 Docker 兼容)
+# 作者: 你的高级软件工程师 (由 AI 助手优化和整合)
+# 版本: 4.0
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
-# --- v2.9 更新日志 ---
-#   - [关键修复] 彻底修复 `delete_port_rule` 函数无法显示和删除规则的问题：
-#     - 修复 `awk` 脚本中正则表达式 `[` 和 `]` 的转义问题，确保它们在字符串字面量中被正确匹配。
-#     - 移除 `delete_port_rule` 管道中多余且错误的 `grep --color=never` 命令。
-#     - 优化 `awk` 内部的逻辑，更健壮地提取规则编号和注释内容。
-#     - 现在可以可靠地列出并删除所有由脚本管理的 IPv4 端口规则。
-#   - [显示优化] `delete_port_rule` 列表现在只显示 IPv4 规则。
-#   - [显示优化] `view_port_rules` 列表现在显示所有由脚本管理的规则，包括 IPv4 和 IPv6。
-#   - [功能变更] 默认初始化时不再开放 2525/tcp 端口，仅默认开放 22/tcp (SSH)。
-#   - [关键修复] 修复 `initialize_firewall` 函数中 `if` 语句的语法错误 (缺少 `fi`)。
-#   - [用户体验] 自动处理 UFW 启用/重新加载/删除时的 SSH 连接中断警告，不再需要手动确认。
-#   - [用户体验] 修复 `read -p` 中颜色代码显示为乱码的问题，将彩色文本与 `read` 提示分离。
-#   - [关键修复] 增强 `ufw enable` 和 `ufw reload` 的健壮性检查，确保防火墙规则正确加载。
-#   - [问题解决] 修复因 UFW 未成功启用导致“没有看到已添加端口”的问题。
-#   - [优化] 明确提示默认开放的 22/tcp 端口。
-#   - [优化] 端口管理和转发管理中的 `grep` 模式更精确，避免误删。
+# --- v4.0 更新日志 ---
+#   - [功能移除] 彻底移除所有 Docker 兼容性相关功能和代码：
+#     - 不再检测 Docker、不提供 Docker 卸载/兼容选项。
+#     - UFW 默认转发策略恢复为 DROP (非 Docker 环境的标准安全配置)。
+#     - 移除所有 Docker 相关的 UFW 规则和配置逻辑。
+#   - [简化] 简化了初始化、菜单显示和卸载流程，使其更专注于纯主机防火墙管理。
+#   - [优化] 保持了 v3.2 中所有关于颜色显示、自动确认、端口管理和端口转发的优化。
 # ==============================================================================
 
 # --- 颜色定义 ---
@@ -32,26 +23,50 @@ print_error() { echo -e "${C_RED}[错误] $1${C_RESET}"; }
 print_success() { echo -e "${C_GREEN}[成功] $1${C_RESET}"; }
 print_info() { echo -e "${C_BLUE}[信息] $1${C_RESET}"; }
 print_warn() { echo -e "${C_YELLOW}[警告] $1${C_RESET}"; }
-press_enter_to_continue() { echo ""; read -p "按 [Enter] 键返回..."; }
+press_enter_to_continue() { echo ""; read -rp "按 [Enter] 键返回..."; }
 
 # --- 全局变量 ---
-COMMENT_TAG="managed-by-ufw-script"
-UFW_DOCKER_FORWARD_RULES_BEGIN="# BEGIN UFW DOCKER FORWARD RULES (managed by script)"
-UFW_DOCKER_FORWARD_RULES_END="# END UFW DOCKER FORWARD RULES (managed by script)"
+COMMENT_TAG="managed-by-ufw-script" # 用于标记由本脚本管理的规则
+# 移除 Docker 相关的全局变量
 UFW_NAT_PREROUTING_RULES_BEGIN="# BEGIN UFW NAT PREROUTING RULES (managed by script)"
 UFW_NAT_PREROUTING_RULES_END="# END UFW NAT PREROUTING RULES (managed by script)"
 
-# 标记 UFW 是否被配置为兼容 Docker
-# true: Docker 已安装且用户选择让 UFW 管理其防火墙
-# false: Docker 未安装或已被卸载
-IS_UFW_DOCKER_COMPATIBLE=false
-
 # --- 核心功能函数 ---
+
+# 确认操作，默认Y
+confirm_action() {
+    local prompt_msg="$1"
+    echo -e "${C_YELLOW}$prompt_msg (Y/n)${C_RESET}" # 提示默认Y
+    read -rp "" choice # 直接读取输入，不带额外提示
+    [[ "${choice:-Y}" =~ ^[Yy]$ ]] # 默认Y
+}
+
+# 重新加载UFW规则 (优化版)
+reload_ufw() {
+    print_info "正在重新加载 UFW 规则..."
+    # 检查 UFW 是否处于活动状态
+    if ! sudo ufw status | grep -q "Status: active"; then
+        print_warn "UFW 当前未启用。跳过重新加载。"
+        press_enter_to_continue
+        return # 如果未启用，则直接返回
+    fi
+
+    # 如果 UFW 已启用，则执行重新加载并自动确认
+    echo "y" | sudo ufw reload > /dev/null 2>&1 # 抑制 UFW 重新加载的输出
+    local reload_exit_code=$?
+
+    if [[ $reload_exit_code -eq 0 ]]; then
+        print_success "UFW 规则重新加载成功。"
+    else
+        print_error "UFW 规则重新加载失败。请检查 UFW 配置或系统日志。"
+    fi
+    press_enter_to_continue
+}
+
 
 # 1. 初始化防火墙
 function initialize_firewall() {
     print_info "开始初始化防火墙配置..."
-    # 修复：if 语句的语法错误，将 `}` 替换为 `fi`
     if [[ $EUID -ne 0 ]]; then print_error "此脚本必须以 root 权限运行。"; exit 1; fi
 
     # 1.1 检测并处理其他防火墙
@@ -59,9 +74,7 @@ function initialize_firewall() {
         print_info "检测到 UFW 已安装。"
         if sudo ufw status | grep -q "Status: active"; then
             print_warn "UFW 正在运行。将重新初始化其配置。"
-            echo -n "是否要禁用并重新初始化 UFW? (Y/n): "
-            read confirm_ufw_reinit
-            if [[ "$confirm_ufw_reinit" =~ ^[Yy]$ || -z "$confirm_ufw_reinit" ]]; then
+            if confirm_action "是否要禁用并重新初始化 UFW?"; then # 默认Y
                 print_info "正在禁用 UFW..."; sudo ufw disable || print_error "禁用 UFW 失败。"
             else
                 print_error "用户取消操作。无法在不重新初始化 UFW 的情况下继续。"; exit 1
@@ -76,9 +89,7 @@ function initialize_firewall() {
     # 检查并处理 iptables-persistent
     if dpkg -l | grep -q iptables-persistent; then
         print_warn "检测到 iptables-persistent 已安装。本脚本使用 UFW 进行管理。"
-        echo -n "是否要卸载 iptables-persistent? (Y/n): "
-        read confirm_iptables_persistent
-        if [[ "$confirm_iptables_persistent" =~ ^[Yy]$ || -z "$confirm_iptables_persistent" ]]; then
+        if confirm_action "是否要卸载 iptables-persistent?"; then # 默认Y
             print_info "正在卸载 iptables-persistent..."; sudo apt-get purge -y iptables-persistent > /dev/null
             print_success "iptables-persistent 已移除。"
         else
@@ -103,109 +114,20 @@ function initialize_firewall() {
     print_success "UFW 已重置。"
     # --- 新增结束 ---
 
-    # 1.3 Docker 存在时的交互式处理
-    if command -v docker &> /dev/null; then
-        print_warn "检测到 Docker 已安装。"
-        local docker_is_running=false
-        if systemctl is-active docker &>/dev/null; then
-            docker_is_running=true
-            print_warn "Docker 服务当前正在运行。"
-        fi
-
-        echo -e "${C_CYAN}--- Docker 环境处理选项 ---${C_RESET}"
-        echo -e "1. ${C_RED}彻底卸载 Docker${C_RESET} (包括所有数据和软件包，将配置为非 Docker 主机防火墙)"
-        echo -e "2. ${C_GREEN}保留 Docker 并让脚本管理其防火墙${C_RESET} (配置为 Docker 兼容防火墙)"
-        echo -e "q. 退出脚本 (不进行任何防火墙初始化)"
-        echo -n "请选择操作: "
-        read docker_choice
-
-        case $docker_choice in
-            1) # 彻底卸载 Docker
-                print_warn "!!! 警告: 此操作将永久删除所有 Docker 相关数据和程序 !!!"
-                echo -n "请再次确认彻底卸载 Docker? (y/N): "
-                read final_confirm_docker_uninstall
-                if [[ "$final_confirm_docker_uninstall" =~ ^[Yy]$ ]]; then
-                    if [ "$docker_is_running" = true ]; then
-                        print_info "正在停止 Docker 服务..."
-                        sudo systemctl stop docker || print_error "停止 Docker 服务失败，请手动检查。"
-                    fi
-                    
-                    print_info "正在删除所有 Docker 网络、容器、镜像和卷..."
-                    sudo docker system prune -a -f || print_warn "Docker 数据清理可能不完全，请手动检查。"
-                    
-                    print_info "正在卸载 Docker 相关软件包..."
-                    sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-engine docker.io || print_warn "部分 Docker 软件包可能未完全卸载，请手动检查。"
-                    
-                    print_info "正在删除 Docker 残留目录..."
-                    sudo rm -rf /var/lib/docker /etc/docker /var/run/docker.sock || print_warn "部分 Docker 目录可能未完全删除，请手动检查。"
-                    
-                    print_success "Docker 已彻底卸载并清理完成。"
-                    IS_UFW_DOCKER_COMPATIBLE=false # Docker 已被卸载，按非 Docker 主机处理
-                else
-                    print_error "用户取消 Docker 卸载。无法在不处理 Docker 的情况下安全初始化防火墙。"
-                    print_error "请手动处理 Docker 或选择卸载，然后重新运行脚本。"
-                    exit 1 # 用户取消，安全退出
-                fi
-                ;;
-            2) # 保留 Docker 并让脚本管理其防火墙
-                print_info "您选择保留 Docker。脚本将配置 UFW 以兼容 Docker。"
-                IS_UFW_DOCKER_COMPATIBLE=true # 脚本将管理 Docker 环境下的防火墙
-                ;;
-            q|Q) # 退出脚本
-                print_info "用户选择退出。防火墙初始化已取消。"
-                exit 0
-                ;;
-            *)
-                print_error "无效选项。防火墙初始化已取消。"
-                exit 1
-                ;;
-        esac
-    else
-        IS_UFW_DOCKER_COMPATIBLE=false # 未检测到 Docker，按非 Docker 主机处理
-        print_info "未检测到 Docker，跳过 Docker 相关处理。"
-    fi
-    # --- Docker 存在时的交互式处理结束 ---
+    # 1.3 移除 Docker 存在时的交互式处理 (整个块已移除)
 
     # 1.4 配置 UFW 默认策略和文件
     print_info "正在配置 UFW 默认策略..."
     sudo ufw default deny incoming
     sudo ufw default allow outgoing
 
-    # 配置 /etc/default/ufw 中的 FORWARD 策略
-    # Docker 兼容模式下，FORWARD必须是ACCEPT，然后通过before.rules中的DROP来控制
-    sudo sed -i '/^DEFAULT_FORWARD_POLICY=/c\DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw
-    print_info "已将 /etc/default/ufw 中的 DEFAULT_FORWARD_POLICY 设置为 ACCEPT (Docker 兼容性要求)。"
+    # 配置 /etc/default/ufw 中的 FORWARD 策略 (恢复为 DROP，非 Docker 环境的标准安全配置)
+    sudo sed -i '/^DEFAULT_FORWARD_POLICY=/c\DEFAULT_FORWARD_POLICY="DROP"' /etc/default/ufw
+    print_info "已将 /etc/default/ufw 中的 DEFAULT_FORWARD_POLICY 设置为 DROP (标准安全配置)。"
 
-    # 1.5 配置 /etc/ufw/before.rules 以实现 Docker 兼容性（默认拒绝转发流量）
-    # 修复：将 Docker 兼容性规则移到 before.rules，并简化规则块
-    print_info "正在配置 /etc/ufw/before.rules 以确保 Docker 流量受控..."
-    local before_rules_docker_content=""
-    if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then
-        # 这些规则确保只有明确允许的 Docker 流量通过 ufw-user-forward 链
-        # Docker 自身的 DNAT 规则在 nat 表中先应用。流量随后进入 FORWARD 链。
-        # UFW 会将流量导向 ufw-user-forward 链，我们在这里进行精细控制。
-        before_rules_docker_content=$(printf "%b" "${UFW_DOCKER_FORWARD_RULES_BEGIN}\n")
-        before_rules_docker_content+=$(printf "%b" "# Allow all established/related connections for forwarded traffic\n")
-        before_rules_docker_content+=$(printf "%b" "-A ufw-user-forward -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n")
-        before_rules_docker_content+=$(printf "%b" "-A ufw-user-forward -j DROP\n") # 这是 Docker 兼容模式下“默认拒绝”的关键
-        before_rules_docker_content+=$(printf "%b" "${UFW_DOCKER_FORWARD_RULES_END}")
-    fi
+    # 1.5 移除 Docker 兼容性规则配置 (整个块已移除)
 
-    # 移除旧的 Docker 兼容规则块 (无论在 before.rules 还是 after.rules)
-    sudo sed -i "/${UFW_DOCKER_FORWARD_RULES_BEGIN}/,/${UFW_DOCKER_FORWARD_RULES_END}/d" /etc/ufw/before.rules 2>/dev/null || true
-    sudo sed -i "/${UFW_DOCKER_FORWARD_RULES_BEGIN}/,/${UFW_DOCKER_FORWARD_RULES_END}/d" /etc/ufw/after.rules 2>/dev/null || true
-
-    # 插入新的 Docker 兼容规则块到 before.rules
-    if [ -n "$before_rules_docker_content" ]; then
-        local temp_rules_file=$(mktemp)
-        echo "$before_rules_docker_content" > "$temp_rules_file"
-        # 插入到 before.rules 文件中第一个 COMMIT 行之前
-        sudo sed -i "/^COMMIT/e cat $temp_rules_file" /etc/ufw/before.rules
-        rm "$temp_rules_file"
-    fi
-    print_success "/etc/ufw/before.rules 配置完成。"
-
-    # 1.6 启用 IP 转发 (sysctl)
+    # 1.6 启用 IP 转发 (sysctl) - 端口转发功能仍需要
     print_info "正在启用 IP 转发..."
     sudo sysctl -w net.ipv4.ip_forward=1 > /dev/null
     sudo sed -i '/^net.ipv4.ip_forward=/c\net.ipv4.ip_forward=1' /etc/sysctl.conf
@@ -214,24 +136,15 @@ function initialize_firewall() {
 
     # 1.7 允许默认端口 (22)
     print_info "正在开放默认端口 22/tcp (SSH)..."
-    # UFW allow 命令是幂等的，重复执行不会创建重复规则
     sudo ufw allow 22/tcp comment "${COMMENT_TAG}:default:ssh"
-    # 移除 2525/tcp 的默认添加
-    # sudo ufw allow 2525/tcp comment "${COMMENT_TAG}:default:custom_port"
     print_success "默认端口开放完成。"
 
     # 1.8 添加安全加固规则 (UFW 内置的 limit 规则)
     print_info "正在添加安全加固规则 (SYN Flood / 端口扫描防护)..."
-    # UFW 默认的 'limit' 规则已经提供了一定程度的防护，例如针对 SSH 的暴力破解。
-    # 对于更通用的 SYN Flood 和端口扫描，UFW 内部的规则已经处理。
-    # 如果需要更高级的防护，可以考虑 Fail2Ban 或更专业的 IDS/IPS。
-    # 这里可以添加一些额外的通用限制，例如针对所有端口的连接速率限制，但通常不推荐，因为可能影响正常服务。
-    # 例如：sudo ufw limit from any to any port 80 proto tcp comment 'Limit HTTP connections'
     print_success "安全加固规则已应用。"
 
     # 1.9 启用 UFW
     print_info "正在启用 UFW 防火墙..."
-    # 修复：确保 ufw enable 成功，并自动确认
     echo "y" | sudo ufw enable || { print_error "启用 UFW 失败！请检查系统日志。"; print_error "请尝试手动执行 'sudo ufw enable' 并查看详细错误信息。"; exit 1; }
     
     # 再次检查 UFW 状态，确保它确实 active
@@ -242,15 +155,7 @@ function initialize_firewall() {
     fi
     print_success "UFW 防火墙已启用并配置完成。"
 
-    # 1.10 提示 Docker 重启 (如果适用)
-    if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ] && [ "$docker_is_running" = true ]; then
-        print_info "正在重启 Docker 服务以确保其规则与 UFW 协同工作..."
-        sudo systemctl restart docker || print_error "重启 Docker 服务失败，请手动检查。"
-        print_success "Docker 服务已重启。"
-        print_info "如果遇到容器网络问题，请尝试再次重启 Docker 服务。"
-    elif [ "$IS_UFW_DOCKER_COMPATIBLE" = true ] && [ "$docker_is_running" = false ]; then
-        print_info "Docker 已安装但未运行。请手动启动 Docker 服务以生成其规则: sudo systemctl start docker"
-    fi
+    # 1.10 移除 Docker 重启提示 (整个块已移除)
     
     print_success "防火墙初始化完成，规则已自动保存。"
     sleep 2
@@ -260,15 +165,12 @@ function initialize_firewall() {
 function manage_ports() {
     while true; do
         clear
-        local docker_status_text="非 Docker 主机"
-        if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
-        echo -e "${C_CYAN}--- 主机与容器端口管理 (当前模式: ${docker_status_text}) ---${C_RESET}"
+        echo -e "${C_CYAN}--- 主机端口管理 ---${C_RESET}" # 移除 Docker 状态显示
         echo "1. 添加新端口规则"
         echo "2. 查看已添加的端口规则"
         echo "3. 删除端口规则"
         echo "q. 返回主菜单"
-        echo -n "请选择操作: "
-        read choice
+        read -rp "请选择操作: " choice
         case $choice in
             1) add_port_rule ;;
             2) view_port_rules ;;
@@ -279,139 +181,85 @@ function manage_ports() {
     done
 }
 
+# 2.1 添加端口规则
 function add_port_rule() {
-    echo -n "请输入要开放的端口号: "
-    read port
-    [[ -z "$port" ]] && { print_error "端口号不能为空。"; press_enter_to_continue; return; }
-    echo -n "请输入协议 (tcp/udp) [默认: tcp]: "
-    read proto
-    proto=${proto:-tcp}
-    echo -n "是否要限制来源IP? (留空则允许所有IP, 或输入IP地址如 8.8.8.8/32): "
-    read source_ip
-
-    local rule_comment="${COMMENT_TAG}:port:${port}:${proto}"
-    if [ -n "$source_ip" ]; then
-        rule_comment+=":from:${source_ip}"
-    fi
-
-    # UFW allow 命令是幂等的，重复执行不会创建重复规则，但为了清晰和修改规则，先删除旧的再添加新的。
-    # 查找并删除所有匹配该端口、协议和来源IP的规则
-    print_info "正在检查并删除端口 ${port}/${proto} (来源: ${source_ip:-所有IP}) 的旧规则..."
-    # 注意：这里仍然排除 IPv6，因为添加规则时通常只考虑 IPv4，避免重复添加 IPv6 规则。
-    local existing_rules=$(sudo ufw status numbered | grep -E "${COMMENT_TAG}:port:${port}:${proto}(:from:${source_ip})?$" | grep -v '(v6)' | awk '{print $1}' | sed 's/\[//;s/\]//' | sort -nr)
-    for num in $existing_rules; do
-        print_info "正在删除规则 [${num}]..."
-        echo "y" | sudo ufw delete "$num" > /dev/null
-    done
-    print_success "旧规则清理完成。"
-
-    local ufw_cmd="sudo ufw allow "
-    if [ -n "$source_ip" ]; then
-        ufw_cmd+="from ${source_ip} "
-    fi
-    ufw_cmd+="to any port ${port} proto ${proto} comment \"${rule_comment}\""
-
-    print_info "将执行: ${ufw_cmd}"
-    if eval ${ufw_cmd}; then
-        print_success "端口 ${port}/${proto} 规则添加成功。"
-    else
-        print_error "添加端口规则失败。"
-    fi
-    press_enter_to_continue
-}
-
-function view_port_rules() {
-    print_info "--- 当前由脚本管理的 UFW 规则 (包括 IPv4 和 IPv6) ---"
-    # 修复：确保显示所有由脚本添加的规则 (包括默认和用户自定义的)，不再排除 IPv6
-    sudo ufw status numbered | grep --color=never "${COMMENT_TAG}:"
-    press_enter_to_continue
-}
-
-function delete_port_rule() {
-    print_info "--- 删除端口规则 (仅显示 IPv4) ---"
-    local managed_rules=()
-    local rule_numbers=()
-    
-    # 收集由脚本管理的所有 IPv4 规则
-    # 关键修复：让 awk 直接处理去除颜色后的完整输出，并在 awk 内部完成所有过滤和解析
-    local awk_script='
-        BEGIN {
-            # tag 变量从 bash 传递进来
-            # 定义一个正则表达式模式，用于匹配注释标签，包括前面的 # 和可选的空格
-            comment_pattern = "# *" tag ":";
-        }
-        # 匹配以 "[数字]" 开头，不含 "(v6)"，并且包含我们注释标签的行
-        # 注意：这里 $0 ~ comment_pattern 确保了行中包含我们的注释
-        /^\\[[0-9]+\\]/ && !/\\(v6\\)/ && $0 ~ comment_pattern {
-            # 提取规则编号
-            # 匹配 [ 1] 或 [1] 这样的格式，并捕获数字
-            # 使用 match() 捕获数字，更健壮
-            if (match($0, /^\\[ *([0-9]+)\\]/, num_arr)) {
-                rule_num = num_arr[1];
-            } else {
-                # 如果无法提取编号，则跳过此行
-                next;
-            }
-
-            # 提取注释内容 (从 # 后面开始，并移除前导空格)
-            # 找到 # 的位置
-            hash_pos = index($0, "#");
-            if (hash_pos > 0) {
-                # 提取 # 之后的所有内容
-                full_comment_part = substr($0, hash_pos + 1);
-                # 移除前导空格
-                sub(/^ */, "", full_comment_part);
-                
-                # 检查清理后的注释是否以我们的 COMMENT_TAG 开头
-                if (full_comment_part ~ "^" tag ":") {
-                    rule_comment_content = full_comment_part;
-                    # 打印提取到的编号和注释，用制表符分隔
-                    print rule_num "\t" rule_comment_content;
-                }
-            }
-        }
-    '
-    
-    # 将 ufw status numbered 的输出通过管道传递给 awk，并传递 COMMENT_TAG 变量
-    # 确保 awk 接收到纯净的文本，并且 awk 内部完成所有过滤
-    while IFS=$'\t' read -r rule_num rule_comment_content; do
-        # awk 已经完成了所有过滤和解析，这里只需确保成功提取到编号和内容
-        if [[ -n "$rule_num" && -n "$rule_comment_content" ]]; then
-            managed_rules+=("规则 [${rule_num}]: ${rule_comment_content}")
-            rule_numbers+=("${rule_num}")
-        fi
-    done < <(sudo ufw status numbered | awk -v tag="${COMMENT_TAG}" "$awk_script")
-
-    if [ ${#managed_rules[@]} -eq 0 ]; then
-        print_warn "没有找到由本脚本管理的任何 IPv4 端口规则。"
+    echo -e "${C_BLUE}--- 添加端口规则 ---${C_RESET}"
+    read -rp "请输入端口号或范围 (例如: 80, 22/tcp, 8000:8010): " port_num
+    if [[ -z "$port_num" ]]; then
+        print_error "端口号不能为空。"
         press_enter_to_continue
         return
     fi
 
-    managed_rules+=("返回")
-    print_info "请选择要删除的规则:"
-    select choice in "${managed_rules[@]}"; do
-        if [[ "$choice" == "返回" ]]; then break; fi
-        if [ -n "$choice" ]; then
-            local selected_num=${rule_numbers[$((REPLY-1))]}
-            print_warn "将要删除规则 [${selected_num}]: ${choice}"
-            echo -n "确认删除吗? (y/N): "
-            read confirm
-            if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                # 修复：自动确认删除
-                local delete_output=$(echo "y" | sudo ufw delete "$selected_num" 2>&1)
-                if echo "$delete_output" | grep -q "Rule deleted"; then
-                    print_success "规则 [${selected_num}] 已成功删除。"
-                else
-                    print_error "删除规则失败。输出: ${delete_output}"; fi
-            else
-                print_info "操作已取消。"; fi
-        else
-            print_error "无效选项。"; fi
-        break
-    done
+    read -rp "请输入协议 (tcp/udp/both, 默认: both): " protocol
+    protocol=${protocol:-both}
+    read -rp "请输入允许访问的源IP地址 (留空则为任意IP): " source_ip
+
+    # 添加 COMMENT_TAG 以便后续管理
+    local rule_comment="${COMMENT_TAG}:port:${port_num}:${protocol}"
+    if [[ -n "$source_ip" ]]; then
+        rule_comment+=":from:${source_ip}"
+    else
+        rule_comment+=":from:any" # 明确标记为any
+    fi
+
+    local ufw_cmd="sudo ufw allow"
+    if [[ -n "$source_ip" ]]; then
+        ufw_cmd+=" from ${source_ip}"
+    fi
+    ufw_cmd+=" to any port ${port_num}"
+    if [[ "$protocol" != "both" ]]; then
+        ufw_cmd+=" proto ${protocol}"
+    fi
+    ufw_cmd+=" comment \"${rule_comment}\""
+
+    print_info "将执行: ${ufw_cmd}"
+    if eval ${ufw_cmd}; then
+        print_success "端口规则添加成功。"
+    else
+        print_error "添加端口规则失败。"
+    fi
+    # 自动重新加载 UFW
+    reload_ufw # 调用优化后的 reload_ufw 函数
+}
+
+# 2.2 查看端口规则 (显示由脚本管理的规则)
+function view_port_rules() {
+    print_info "--- 当前由脚本管理的 UFW 规则 (包括 IPv4 和 IPv6) ---"
+    # 过滤出带有 COMMENT_TAG 的规则
+    sudo ufw status numbered | grep --color=never "${COMMENT_TAG}:"
     press_enter_to_continue
 }
+
+# 2.3 删除端口规则
+function delete_port_rule() {
+    print_info "--- 删除端口规则 ---"
+    sudo ufw status numbered # 显示所有规则及其编号
+    print_warn "请注意: 删除规则可能导致服务不可用或安全风险。"
+    read -rp "请输入要删除的规则编号: " rule_num
+    if [[ -z "$rule_num" || ! "$rule_num" =~ ^[0-9]+$ ]]; then
+        print_error "无效的规则编号。"
+        press_enter_to_continue
+        return
+    fi
+
+    if confirm_action "确定要删除规则 ${rule_num} 吗？"; then # confirm_action 默认Y
+        # 自动确认 ufw delete 操作，并抑制其输出，只检查退出状态
+        echo "y" | sudo ufw delete "$rule_num" > /dev/null 2>&1
+        local delete_exit_code=$? # 获取 ufw delete 命令的退出状态码
+
+        if [[ $delete_exit_code -eq 0 ]]; then
+            print_success "规则 ${rule_num} 已成功删除。"
+        else
+            print_error "删除规则失败。UFW 命令返回错误码: ${delete_exit_code}";
+            print_error "请检查 UFW 状态或规则编号是否正确。"
+        fi
+    else
+        print_info "操作已取消。"; fi
+    # 自动重新加载 UFW
+    reload_ufw # 调用优化后的 reload_ufw 函数
+}
+
 
 # 3. 端口转发 (NAT) 管理
 function manage_forwarding() {
@@ -421,8 +269,7 @@ function manage_forwarding() {
         echo "2. 查看已添加的转发规则"
         echo "3. 删除转发规则"
         echo "q. 返回主菜单"
-        echo -n "请选择操作: "
-        read choice
+        read -rp "请选择操作: " choice
         case $choice in
             1) add_forwarding_rule ;;
             2) view_forwarding_rules ;;
@@ -434,17 +281,13 @@ function manage_forwarding() {
 }
 
 function add_forwarding_rule() {
-    echo -n "请输入源端口 (本机被访问的端口): "
-    read from_port
+    read -rp "请输入源端口 (本机被访问的端口): " from_port
     [[ -z "$from_port" ]] && { print_error "源端口不能为空。"; press_enter_to_continue; return; }
-    echo -n "请输入目标IP (转发到哪个IP，例如 192.168.1.100): "
-    read to_ip
+    read -rp "请输入目标IP (转发到哪个IP，例如 192.168.1.100): " to_ip
     [[ -z "$to_ip" ]] && { print_error "目标IP不能为空。"; press_enter_to_continue; return; }
-    echo -n "请输入目标端口 (转发到哪个端口): "
-    read to_port
+    read -rp "请输入目标端口 (转发到哪个端口): " to_port
     [[ -z "$to_port" ]] && { print_error "目标端口不能为空。"; press_enter_to_continue; return; }
-    echo -n "请输入协议 (tcp/udp) [默认: tcp]: "
-    read proto
+    read -rp "请输入协议 (tcp/udp) [默认: tcp]: " proto
     proto=${proto:-tcp}
 
     local rule_comment="${COMMENT_TAG}:fwd:${from_port}:${proto}:to:${to_ip}:${to_port}"
@@ -472,9 +315,7 @@ function add_forwarding_rule() {
     rm "$temp_rule_file"
 
     # 重新加载 UFW 使规则生效
-    print_info "正在重新加载 UFW 规则..."
-    # 修复：自动确认重新加载
-    echo "y" | sudo ufw reload || { print_error "UFW 重新加载失败！请检查 /etc/ufw/before.rules 文件。"; press_enter_to_continue; return; }
+    reload_ufw # 调用优化后的 reload_ufw 函数
     print_success "端口转发规则添加成功。"
     print_warn "注意：如果目标IP不是本机，可能需要配置 MASQUERADE (SNAT) 规则，请根据您的网络环境手动添加。"
     press_enter_to_continue
@@ -513,13 +354,10 @@ function delete_forwarding_rule() {
         if [ -n "$choice" ]; then
             local selected_comment=${rule_comments[$((REPLY-1))]}
             print_warn "将要删除转发规则: ${choice}"
-            echo -n "确认删除吗? (y/N): "
-            read confirm
-            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            if confirm_action "确认删除吗?"; then # 默认Y
                 sudo sed -i "/^.*${selected_comment}.*$/d" /etc/ufw/before.rules
-                print_info "正在重新加载 UFW 规则..."
-                # 修复：自动确认重新加载
-                echo "y" | sudo ufw reload || { print_error "UFW 重新加载失败！请检查 /etc/ufw/before.rules 文件。"; press_enter_to_continue; return; }
+                # 重新加载 UFW 使规则生效
+                reload_ufw # 调用优化后的 reload_ufw 函数
                 print_success "转发规则已成功删除。"
             else
                 print_info "操作已取消。"; fi
@@ -547,7 +385,23 @@ function manage_load_balancing() {
 function view_traffic() {
     print_info "正在启动实时流量监控... (按 Ctrl+C 退出)"
     sleep 1
-    watch -n 2 "sudo ufw status verbose"
+    # 检查 iftop 或 nload 是否安装，提供更好的用户体验
+    if command -v iftop &> /dev/null; then
+        print_info "${C_GREEN}iftop 已安装，正在启动实时流量监控 (按 'q' 退出)...${C_RESET}"
+        sudo iftop -P -N -s 2 # -P: show ports, -N: no hostname, -s 2: update every 2 seconds
+    elif command -v nload &> /dev/null; then
+        print_info "${C_GREEN}nload 已安装，正在启动实时流量监控 (按 'q' 退出)...${C_RESET}"
+        sudo nload
+    else
+        print_error "iftop 或 nload 未安装。建议安装其中一个以查看实时流量。"
+        print_warn "您可以尝试安装: sudo apt install iftop 或 sudo apt install nload"
+        print_info "以下是当前网络接口统计信息 (非实时):"
+        ip -s link
+        echo ""
+        print_info "以下是当前监听端口和连接 (非实时):"
+        ss -tulnp
+    fi
+    press_enter_to_continue
 }
 
 # 6. 卸载功能
@@ -560,11 +414,9 @@ function uninstall_firewall() {
     print_warn "3. 卸载 UFW 软件包。"
     print_warn "4. 删除脚本添加的自定义规则文件内容。"
     echo ""
-    echo -n "要继续，请输入 'YES' (大小写敏感): "
-    read confirm1
+    read -rp "要继续，请输入 'YES' (大小写敏感): " confirm1
     if [ "$confirm1" != "YES" ]; then print_info "操作已取消。"; press_enter_to_continue; return; fi
-    echo -n "请再次输入 'DELETE MY FIREWALL' 以最终确认: "
-    read confirm2
+    read -rp "请再次输入 'DELETE MY FIREWALL' 以最终确认: " confirm2
     if [ "$confirm2" != "DELETE MY FIREWALL" ]; then print_info "操作已取消。"; press_enter_to_continue; return; fi
     
     print_info "正在禁用 UFW..."
@@ -582,9 +434,9 @@ function uninstall_firewall() {
     print_success "UFW 已卸载。"
 
     print_info "正在清理脚本添加的自定义规则文件内容..."
-    # 清理 before.rules 和 after.rules 中的脚本标记块
-    sudo sed -i "/${UFW_DOCKER_FORWARD_RULES_BEGIN}/,/${UFW_DOCKER_FORWARD_RULES_END}/d" /etc/ufw/before.rules 2>/dev/null || true
-    sudo sed -i "/${UFW_DOCKER_FORWARD_RULES_BEGIN}/,/${UFW_DOCKER_FORWARD_RULES_END}/d" /etc/ufw/after.rules 2>/dev/null || true # 确保清理旧位置
+    # 清理 before.rules 和 after.rules 中的脚本标记块 (包括旧的 Docker 标记，以防万一)
+    sudo sed -i "/# BEGIN UFW DOCKER FORWARD RULES (managed by script)/,/# END UFW DOCKER FORWARD RULES (managed by script)/d" /etc/ufw/before.rules 2>/dev/null || true
+    sudo sed -i "/# BEGIN UFW DOCKER FORWARD RULES (managed by script)/,/# END UFW DOCKER FORWARD RULES (managed by script)/d" /etc/ufw/after.rules 2>/dev/null || true
     sudo sed -i "/${UFW_NAT_PREROUTING_RULES_BEGIN}/,/${UFW_NAT_PREROUTING_RULES_END}/d" /etc/ufw/before.rules 2>/dev/null || true
     
     # 恢复 /etc/default/ufw 的默认转发策略
@@ -604,45 +456,25 @@ function main_menu() {
     # 首次运行或 UFW 未启用时，自动初始化
     if ! command -v ufw &> /dev/null || ! sudo ufw status | grep -q "Status: active"; then
         initialize_firewall
-    else
-        # 检查 UFW 是否被配置为 Docker 兼容模式
-        # 检查 DEFAULT_FORWARD_POLICY 和 before.rules 中的 Docker 兼容性标记
-        if grep -q '^DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw && \
-           grep -q "${UFW_DOCKER_FORWARD_RULES_BEGIN}" /etc/ufw/before.rules && \
-           grep -q "${UFW_DOCKER_FORWARD_RULES_END}" /etc/ufw/before.rules; then
-            IS_UFW_DOCKER_COMPATIBLE=true
-        else
-            IS_UFW_DOCKER_COMPATIBLE=false
-            # 如果 Docker 存在但 UFW 未配置为兼容模式，则提示
-            if command -v docker &> /dev/null; then
-                print_warn "检测到 Docker 已安装，但 UFW 未配置为 Docker 兼容模式。"
-                print_warn "强烈建议您运行 '5. 重新运行初始化并应用基础安全配置' 并选择保留 Docker，以确保安全。"
-                sleep 3
-            fi
-        fi
     fi
+    # 移除 Docker 兼容性检查和状态显示
 
     while true; do
         clear
-        local docker_status_text="非 Docker 主机"
-        if [ "$IS_UFW_DOCKER_COMPATIBLE" = true ]; then docker_status_text="${C_GREEN}已配置 (Docker 兼容模式)${C_RESET}"; fi
-        
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v2.9 (安全默认 & 深度集成)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v4.0 (安全默认 & 无 Docker)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e " UFW Docker 兼容状态: ${docker_status_text}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
         echo "-----------------------------------------------------"
         echo -e "1. 端口管理 (添加/查看/删除)"
         echo -e "2. 端口转发(NAT)管理 (添加/查看/删除)"
         echo -e "3. 负载均衡/轮询 (说明与建议)"
         echo -e "4. 实时查看网络流量和规则计数"
-        echo -e "5. [危险] 重新运行初始化并应用基础安全配置"
+        echo -e "5. ${C_RED}[危险] 重新运行初始化并应用基础安全配置${C_RESET}"
         echo -e "6. ${C_RED}[极度危险] 卸载并重置防火墙${C_RESET}"
         echo "q. 退出"
         echo "-----------------------------------------------------"
-        echo -n "请输入您的选择: "
-        read choice
+        read -rp "请输入您的选择: " choice
 
         case $choice in
             1) manage_ports ;;
