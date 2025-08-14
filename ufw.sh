@@ -12,6 +12,11 @@
 #   - [移除功能] 移除了主菜单中单独的 "启用 UFW 防火墙" 选项，因为初始化已包含此功能。
 #   - [优化] 保持了之前版本中所有关于颜色显示、自动确认、端口管理和端口转发的优化。
 #   - [功能移除] 彻底移除了所有 Docker 兼容性相关功能和代码。
+# --- v6.2 更新日志 (新增) ---
+#   - [新增功能] 添加了“关闭 UFW 防火墙”选项。
+#   - [新增功能] 添加了“开启 UFW 防火墙”选项。
+#   - [新增功能] 添加了“重启 UFW 防火墙”选项。
+#   - [优化] 主菜单选项编号调整。
 # ==============================================================================
 
 # --- 颜色定义 ---
@@ -451,17 +456,44 @@ function manage_load_balancing() {
 }
 
 # 5. 实时流量监控
+# 5. 实时流量监控
 function view_traffic() {
     print_info "正在启动实时流量监控... (按 Ctrl+C 退出)"
     sleep 1
-    # 检查 iftop 或 nload 是否安装，提供更好的用户体验
+
+    # 检查 iftop 是否安装，如果未安装则尝试安装
+    if ! command -v iftop &> /dev/null; then
+        print_warn "iftop 未安装。正在尝试安装 iftop..."
+        sudo apt update > /dev/null 2>&1 # 静默更新apt缓存
+        if sudo apt install iftop -y; then
+            print_success "iftop 安装成功。"
+        else
+            print_error "iftop 安装失败。请检查网络连接或APT源。"
+            # 如果iftop安装失败，则尝试nload或显示基本信息
+            if command -v nload &> /dev/null; then
+                print_info "${C_GREEN}nload 已安装，正在启动实时流量监控 (按 'q' 退出)...${C_RESET}"
+                sudo nload
+            else
+                print_error "iftop 和 nload 都未安装或安装失败。"
+                print_info "以下是当前网络接口统计信息 (非实时):"
+                ip -s link
+                echo ""
+                print_info "以下是当前监听端口和连接 (非实时):"
+                ss -tulnp
+            fi
+            press_enter_to_continue
+            return # 安装失败或无可用工具，直接返回
+        fi
+    fi
+
+    # 如果 iftop 已经安装（或刚刚成功安装），则运行 iftop
     if command -v iftop &> /dev/null; then
         print_info "${C_GREEN}iftop 已安装，正在启动实时流量监控 (按 'q' 退出)...${C_RESET}"
         sudo iftop -P -N -s 2 # -P: show ports, -N: no hostname, -s 2: update every 2 seconds
-    elif command -v nload &> /dev/null; then
+    elif command -v nload &> /dev/null; then # 备用方案，如果iftop安装失败但nload存在
         print_info "${C_GREEN}nload 已安装，正在启动实时流量监控 (按 'q' 退出)...${C_RESET}"
         sudo nload
-    else
+    else # 最终备用方案，如果iftop和nload都不行
         print_error "iftop 或 nload 未安装。建议安装其中一个以查看实时流量。"
         print_warn "您可以尝试安装: sudo apt install iftop 或 sudo apt install nload"
         print_info "以下是当前网络接口统计信息 (非实时):"
@@ -520,6 +552,68 @@ function uninstall_firewall() {
     press_enter_to_continue
 }
 
+# --- 新增功能：UFW 状态控制 ---
+
+# 关闭 UFW 防火墙
+function disable_ufw_firewall() {
+    print_info "--- 关闭 UFW 防火墙 ---"
+    if ! is_ufw_active; then
+        print_warn "UFW 防火墙当前已是禁用状态，无需操作。"
+        press_enter_to_continue
+        return
+    fi
+
+    if confirm_action "确定要关闭 UFW 防火墙吗？关闭后服务器将失去防火墙保护！"; then
+        print_info "正在关闭 UFW 防火墙..."
+        echo "y" | sudo ufw disable > /dev/null 2>&1
+        if ! is_ufw_active; then
+            print_success "UFW 防火墙已成功关闭。"
+        else
+            print_error "关闭 UFW 防火墙失败。请检查系统日志。"
+        fi
+    else
+        print_info "操作已取消。"
+    fi
+    press_enter_to_continue
+}
+
+# 重启 UFW 防火墙
+function restart_ufw_firewall() {
+    print_info "--- 重启 UFW 防火墙 ---"
+    if ! is_ufw_active; then
+        print_warn "UFW 防火墙当前未启用，将尝试直接开启。"
+        enable_ufw_firewall # 如果未启用，直接尝试开启
+        return
+    fi
+
+    if confirm_action "确定要重启 UFW 防火墙吗？这会短暂中断网络连接。"; then
+        print_info "正在禁用 UFW..."
+        echo "y" | sudo ufw disable > /dev/null 2>&1
+        sleep 1 # 短暂等待
+
+        print_info "正在启用 UFW..."
+        local ufw_enable_output=$(echo "y" | sudo ufw enable 2>&1)
+        local ufw_enable_exit_code=$?
+        sleep 2 # 再次等待 UFW 状态更新
+
+        if [[ $ufw_enable_exit_code -eq 0 ]] && is_ufw_active; then
+            print_success "UFW 防火墙已成功重启。"
+        else
+            print_error "重启 UFW 防火墙失败。防火墙可能未正常工作！"
+            print_error "UFW enable 命令退出码: ${ufw_enable_exit_code}"
+            print_error "UFW enable 命令输出 (可能包含警告/错误):"
+            echo -e "${C_YELLOW}--- UFW Enable Output Start ---${C_RESET}"
+            echo -e "${C_YELLOW}${ufw_enable_output}${C_RESET}"
+            echo -e "${C_YELLOW}--- UFW Enable Output End ---${C_RESET}"
+            print_error "请检查 UFW 服务状态或系统日志以获取更多信息。"
+        fi
+    else
+        print_info "操作已取消。"
+    fi
+    press_enter_to_continue
+}
+
+
 # --- 主菜单 ---
 function main_menu() {
     # 首次运行或 UFW 未安装时，自动初始化配置
@@ -530,7 +624,7 @@ function main_menu() {
     while true; do
         clear
         echo -e "${C_CYAN}=====================================================${C_RESET}"
-        echo -e "${C_CYAN}  UFW 智能管理脚本 v6.1 (安全默认 & 无 Docker)      ${C_RESET}"
+        echo -e "${C_CYAN}  UFW 智能管理脚本 v6.2 (安全默认 & 无 Docker)      ${C_RESET}"
         echo -e "${C_CYAN}=====================================================${C_RESET}"
         print_info "所有规则变更后将自动保存，无需手动操作。"
         
@@ -553,6 +647,9 @@ function main_menu() {
         echo -e "4. 实时查看网络流量和规则计数"
         echo -e "5. ${C_RED}[危险] 重新运行初始化并应用基础安全配置${C_RESET}"
         echo -e "6. ${C_RED}[极度危险] 卸载并重置防火墙${C_RESET}"
+        echo "-----------------------------------------------------"
+        echo -e "7. 关闭 UFW 防火墙"
+        echo -e "8. 重启 UFW 防火墙"
         echo "q. 退出"
         echo "-----------------------------------------------------"
         read -rp "请输入您的选择: " choice
@@ -564,6 +661,8 @@ function main_menu() {
             4) view_traffic ;;
             5) initialize_firewall; press_enter_to_continue ;;
             6) uninstall_firewall ;;
+            7) disable_ufw_firewall ;; # 新增
+            8) restart_ufw_firewall ;; # 新增
             q|Q) print_info "正在退出。"; exit 0 ;;
             *) print_error "无效选项，请重试。"; sleep 1 ;;
         esac
@@ -572,3 +671,4 @@ function main_menu() {
 
 # --- 脚本入口 ---
 main_menu
+
