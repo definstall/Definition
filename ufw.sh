@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ==============================================================================
-# UFW 智能管理脚本 v6.1 (安全默认 & 无 Docker 兼容 & 自动启用带诊断)
+# UFW 智能管理脚本 v6.2 (安全默认 & 无 Docker 兼容 & 自动启用带诊断)
 # 作者: 你的高级软件工程师 (由 AI 助手优化和整合)
-# 版本: 6.1
+# 版本: 6.2
 # 兼容性: Ubuntu 20.04+ / Debian 10+
 #
 # --- v6.1 更新日志 ---
@@ -17,6 +17,9 @@
 #   - [新增功能] 添加了“开启 UFW 防火墙”选项。
 #   - [新增功能] 添加了“重启 UFW 防火墙”选项。
 #   - [优化] 主菜单选项编号调整。
+#   - [优化] `view_traffic` 函数：如果 `iftop` 未安装，自动尝试安装。
+#   - [关键修复] 优化 `is_ufw_active` 函数的判断逻辑，使其更精确和健壮，解决 UFW 状态误判问题。
+#   - [优化] 增强 `enable_ufw_firewall` 和 `disable_ufw_firewall` 函数的健壮性，增加备用 `systemctl` 操作和更详细的错误诊断。
 # ==============================================================================
 
 # --- 颜色定义 ---
@@ -44,22 +47,16 @@ confirm_action() {
     [[ "${choice:-Y}" =~ ^[Yy]$ ]] # 默认Y
 }
 
-# 检查 UFW 是否处于活动状态 (支持多语言输出，更鲁棒的匹配)
+# 检查 UFW 是否处于活动状态 (更鲁棒的匹配)
+# 强制英文输出，并精确匹配 "Status: active"
 is_ufw_active() {
-    # 获取 UFW 状态的原始输出，并尝试提取包含 "Status" 或 "状态" 的行
-    local status_line=$(sudo ufw status | grep -Ei "^(Status|状态)[[:space:]]*[：:]" | head -n 1)
+    local status_output=$(LANG=C sudo ufw status)
     
-    if [[ -z "$status_line" ]]; then
-        # 如果没有找到状态行，则认为 UFW 未能正确报告状态，视为非活动
-        return 1
-    fi
-
-    # 检查提取到的状态行是否包含 "active" (英文) 或 "活动"/"激活" (中文)
-    if echo "$status_line" | grep -qEi "(active|活动|激活)"; then
-        return 0 # 匹配到活动状态
+    if echo "$status_output" | grep -q "Status: active"; then
+        return 0 # UFW is active
     fi
     
-    return 1 # 未匹配到活动状态
+    return 1 # UFW is not active (inactive or not running)
 }
 
 # 重新加载UFW规则 (优化版)
@@ -456,7 +453,6 @@ function manage_load_balancing() {
 }
 
 # 5. 实时流量监控
-# 5. 实时流量监控
 function view_traffic() {
     print_info "正在启动实时流量监控... (按 Ctrl+C 退出)"
     sleep 1
@@ -564,12 +560,91 @@ function disable_ufw_firewall() {
     fi
 
     if confirm_action "确定要关闭 UFW 防火墙吗？关闭后服务器将失去防火墙保护！"; then
-        print_info "正在关闭 UFW 防火墙..."
-        echo "y" | sudo ufw disable > /dev/null 2>&1
-        if ! is_ufw_active; then
+        print_info "正在尝试关闭 UFW 防火墙..."
+        
+        # 尝试禁用 UFW，并捕获输出
+        local ufw_disable_output=$(echo "y" | sudo ufw disable 2>&1)
+        local ufw_disable_exit_code=$?
+
+        sleep 2 # 增加等待时间，给 UFW 足够的时间来更新其状态
+
+        if [[ $ufw_disable_exit_code -eq 0 ]] && ! is_ufw_active; then
             print_success "UFW 防火墙已成功关闭。"
         else
-            print_error "关闭 UFW 防火墙失败。请检查系统日志。"
+            # 如果 ufw disable 失败或状态未更新
+            print_error "UFW disable 命令未能成功关闭防火墙或状态未更新。"
+            print_error "UFW disable 命令退出码: ${ufw_disable_exit_code}"
+            print_error "UFW disable 命令输出 (可能包含警告/错误):"
+            echo -e "${C_YELLOW}--- UFW Disable Output Start ---${C_RESET}"
+            echo -e "${C_YELLOW}${ufw_disable_output}${C_RESET}"
+            echo -e "${C_YELLOW}--- UFW Disable Output End ---${C_RESET}"
+
+            # 尝试通过 systemctl 停止 UFW 服务作为备用方案
+            print_info "尝试通过 systemctl 停止 UFW 服务..."
+            if sudo systemctl stop ufw; then
+                sleep 2 # 再次等待 systemctl 操作完成
+                if ! is_ufw_active; then
+                    print_success "UFW 防火墙已通过 systemctl 成功关闭。"
+                else
+                    print_error "通过 systemctl 停止 UFW 服务后，防火墙状态仍为活动。"
+                    print_error "请检查 UFW 服务状态 (${C_YELLOW}sudo systemctl status ufw${C_RESET}) 或系统日志 (${C_YELLOW}journalctl -xeu ufw${C_RESET}) 以获取更多信息。"
+                fi
+            else
+                print_error "通过 systemctl 停止 UFW 服务失败。"
+                print_error "请检查 UFW 服务状态 (${C_YELLOW}sudo systemctl status ufw${C_RESET}) 或系统日志 (${C_YELLOW}journalctl -xeu ufw${C_RESET}) 以获取更多信息。"
+            fi
+        fi
+    else
+        print_info "操作已取消。"
+    fi
+    press_enter_to_continue
+}
+
+# 开启 UFW 防火墙
+function enable_ufw_firewall() {
+    print_info "--- 开启 UFW 防火墙 ---"
+    if is_ufw_active; then
+        print_warn "UFW 防火墙当前已是启用状态，无需操作。"
+        press_enter_to_continue
+        return
+    fi
+
+    if confirm_action "确定要开启 UFW 防火墙吗？"; then
+        print_info "正在尝试开启 UFW 防火墙..."
+        
+        # 尝试启用 UFW，并捕获输出
+        local ufw_enable_output=$(echo "y" | sudo ufw enable 2>&1)
+        local ufw_enable_exit_code=$?
+
+        # 给 UFW 一点时间来应用规则并更新其状态
+        sleep 2
+
+        if [[ $ufw_enable_exit_code -eq 0 ]] && is_ufw_active; then
+            print_success "UFW 防火墙已成功开启。"
+        else
+            # 如果 ufw enable 失败，提供诊断信息并尝试通过 systemctl 启动服务
+            print_error "UFW enable 命令未能成功启用防火墙。尝试通过 systemctl 启动服务..."
+            print_error "UFW enable 命令退出码: ${ufw_enable_exit_code}"
+            print_error "UFW enable 命令输出 (可能包含警告/错误):"
+            echo -e "${C_YELLOW}--- UFW Enable Output Start ---${C_RESET}"
+            echo -e "${C_YELLOW}${ufw_enable_output}${C_RESET}"
+            echo -e "${C_YELLOW}--- UFW Enable Output End ---${C_RESET}"
+
+            # 尝试通过 systemctl 启动 UFW 服务
+            # 使用 restart 而不是 start，因为 restart 更能确保服务从干净状态启动，
+            # 这与您观察到的“重启可以”的现象一致。
+            if sudo systemctl restart ufw; then
+                sleep 2 # 再次等待 UFW 状态更新
+                if is_ufw_active; then
+                    print_success "UFW 防火墙已通过 systemctl 成功开启。"
+                else
+                    print_error "通过 systemctl 启动 UFW 服务后，防火墙状态仍为非活动。"
+                    print_error "请检查 UFW 服务状态 (${C_YELLOW}sudo systemctl status ufw${C_RESET}) 或系统日志 (${C_YELLOW}journalctl -xeu ufw${C_RESET}) 以获取更多信息。"
+                fi
+            else
+                print_error "通过 systemctl 启动 UFW 服务失败。"
+                print_error "请检查 UFW 服务状态 (${C_YELLOW}sudo systemctl status ufw${C_RESET}) 或系统日志 (${C_YELLOW}journalctl -xeu ufw${C_RESET}) 以获取更多信息。"
+            fi
         fi
     else
         print_info "操作已取消。"
@@ -580,37 +655,19 @@ function disable_ufw_firewall() {
 # 重启 UFW 防火墙
 function restart_ufw_firewall() {
     print_info "--- 重启 UFW 防火墙 ---"
-    if ! is_ufw_active; then
-        print_warn "UFW 防火墙当前未启用，将尝试直接开启。"
-        enable_ufw_firewall # 如果未启用，直接尝试开启
-        return
-    fi
-
     if confirm_action "确定要重启 UFW 防火墙吗？这会短暂中断网络连接。"; then
+        # 先尝试禁用，确保服务状态被重置
         print_info "正在禁用 UFW..."
         echo "y" | sudo ufw disable > /dev/null 2>&1
         sleep 1 # 短暂等待
 
-        print_info "正在启用 UFW..."
-        local ufw_enable_output=$(echo "y" | sudo ufw enable 2>&1)
-        local ufw_enable_exit_code=$?
-        sleep 2 # 再次等待 UFW 状态更新
-
-        if [[ $ufw_enable_exit_code -eq 0 ]] && is_ufw_active; then
-            print_success "UFW 防火墙已成功重启。"
-        else
-            print_error "重启 UFW 防火墙失败。防火墙可能未正常工作！"
-            print_error "UFW enable 命令退出码: ${ufw_enable_exit_code}"
-            print_error "UFW enable 命令输出 (可能包含警告/错误):"
-            echo -e "${C_YELLOW}--- UFW Enable Output Start ---${C_RESET}"
-            echo -e "${C_YELLOW}${ufw_enable_output}${C_RESET}"
-            echo -e "${C_YELLOW}--- UFW Enable Output End ---${C_RESET}"
-            print_error "请检查 UFW 服务状态或系统日志以获取更多信息。"
-        fi
+        # 然后调用增强后的 enable 函数
+        enable_ufw_firewall # 调用上面增强的开启函数
+        # 注意：enable_ufw_firewall 内部已经包含了 press_enter_to_continue，所以这里不需要重复调用
     else
         print_info "操作已取消。"
+        press_enter_to_continue
     fi
-    press_enter_to_continue
 }
 
 
@@ -629,7 +686,7 @@ function main_menu() {
         print_info "所有规则变更后将自动保存，无需手动操作。"
         
         # 获取 UFW 状态的原始输出的第一行，用于显示
-        local raw_ufw_status_output=$(sudo ufw status | head -n 1) 
+        local raw_ufw_status_output=$(LANG=C sudo ufw status | head -n 1) # 强制英文输出
         local display_status_text=""
 
         # 根据 is_ufw_active 判断并设置显示文本
@@ -649,7 +706,8 @@ function main_menu() {
         echo -e "6. ${C_RED}[极度危险] 卸载并重置防火墙${C_RESET}"
         echo "-----------------------------------------------------"
         echo -e "7. 关闭 UFW 防火墙"
-        echo -e "8. 重启 UFW 防火墙"
+        echo -e "8. 开启 UFW 防火墙"
+        echo -e "9. 重启 UFW 防火墙"
         echo "q. 退出"
         echo "-----------------------------------------------------"
         read -rp "请输入您的选择: " choice
@@ -662,7 +720,8 @@ function main_menu() {
             5) initialize_firewall; press_enter_to_continue ;;
             6) uninstall_firewall ;;
             7) disable_ufw_firewall ;; # 新增
-            8) restart_ufw_firewall ;; # 新增
+            8) enable_ufw_firewall ;;  # 新增
+            9) restart_ufw_firewall ;; # 新增
             q|Q) print_info "正在退出。"; exit 0 ;;
             *) print_error "无效选项，请重试。"; sleep 1 ;;
         esac
@@ -671,4 +730,3 @@ function main_menu() {
 
 # --- 脚本入口 ---
 main_menu
-
