@@ -153,7 +153,7 @@ esac
 # 下载并安装 PowerMTA 和 cf_pmta
 install_powermta() {
     local download_url="https://www.dropbox.com/scl/fi/won4kyoidiflxbpxwelbl/PMTA.zip?rlkey=4e5iz4fnbc05p0izt3fah3nqa&st=04uftyj9&dl=0"
-    local cf_download_url="https://www.dropbox.com/scl/fi/ytwlqqqf8hltamaysekkj/cf_pmta?rlkey=ylvxuhhd8fxbvosgahvr79052&st=om5zpr94&dl=0"
+    local cf_download_url="https://www.dropbox.com/scl/fi/gtogid086exg58zewm3eo/cf_pmta?rlkey=4c4fwt2hg7cah1we8jygewc9k&st=z97e84ad&dl=0"
     local zip_file="PMTA.zip"
     local rpm_file="PowerMTA.rpm"
     local cf_file="/etc/pmta/cf_pmta"
