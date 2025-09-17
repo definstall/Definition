@@ -1,413 +1,959 @@
 #!/bin/bash
 
-# PowerMTA 安装和管理脚本，仅支持 Ubuntu 系统
-# 需要以 root 或 sudo 权限运行
-# 优化交互式体验，自动生成 X.509 证书（CN=mail.example.com），下载并运行 cf_pmta
+# cf.sh - Postfix 安装、调试和管理脚本
+# 基于 Debian/Ubuntu 系统（使用 apt）。
+# 运行前请确保你拥有 root 权限：sudo ./cf.sh
 
-set -e  # 遇到错误时退出
+set -e
+export LC_ALL=C
 
-# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # 无颜色
+NC='\033[0m'
 
-# 打印状态信息的函数
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="/root/Postfix_logs"
+TEMP_RESPONSE_FILE="$LOG_DIR/cloudflare_api_response.txt"
+LOG_FILE="$LOG_DIR/Postfix_install.log"
+CONFIG_FILE="$SCRIPT_DIR/Postfix.conf"
+USE_JQ=true
+CLOUDFLARE_EMAIL=""
+CLOUDFLARE_API_KEY=""
+DOMAIN=""
+ZONE_ID=""
+EXTERNAL_IP=""
+MAIN_DOMAIN=""
+SMTP_USER=""
+SMTP_PASS=""
+DKIM_SELECTOR="mail"
+CERT_DIR="/etc/postfix/ssl"
+CERT_FILE="$CERT_DIR/smtpd.crt"
+KEY_FILE="$CERT_DIR/smtpd.key"
+
+init_logs() {
+    mkdir -p "$LOG_DIR"
+    touch "$LOG_FILE"
+    chmod 644 "$LOG_FILE"
+}
+
 print_status() {
-    echo -e "${GREEN}[信息]${NC} $1"
+    echo -e "${GREEN}[信息]${NC} $1" >&2
+    echo "[信息] $(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"
 }
 
 print_warning() {
-    echo -e "${YELLOW}[警告]${NC} $1"
+    echo -e "${YELLOW}[警告]${NC} $1" >&2
+    echo "[警告] $(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"
 }
 
 print_error() {
-    echo -e "${RED}[错误]${NC} $1"
-    exit 1
+    echo -e "${RED}[错误]${NC} $1" >&2
+    echo "[错误] $(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"
 }
 
-# 检查是否以 root 权限运行
-check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        print_error "此脚本必须以 root 权限运行（使用 sudo）。"
-        exit 1
-    fi
-}
-
-# 检测 Ubuntu 系统
-detect_ubuntu() {
-    if [[ ! -f /etc/os-release ]]; then
-        print_error "无法检测操作系统，/etc/os-release 文件不存在。"
-        exit 1
-    fi
-    . /etc/os-release
-    if [[ "$ID" != "ubuntu" ]]; then
-        print_error "此脚本仅支持 Ubuntu 系统。检测到：$ID"
-        exit 1
-    fi
-    print_status "检测到 Ubuntu 版本：$VERSION_ID"
-}
-
-# 检查 PowerMTA 服务状态
-get_service_status() {
-    if systemctl is-active --quiet pmta; then
-        echo "运行中"
+check_json_parser() {
+    if command -v jq >/dev/null 2>&1; then
+        print_status "检测到 jq，将优先使用 jq 解析 JSON。"
+        USE_JQ=true
+    elif command -v python3 >/dev/null 2>&1; then
+        print_warning "未检测到 jq，将使用 Python 解析 JSON。"
+        USE_JQ=false
     else
-        echo "未运行"
-    fi
-}
-
-# 生成 RSA 密钥对
-generate_keys() {
-    print_status "正在生成 RSA 密钥对..."
-    mkdir -p /etc/pmta
-    openssl genrsa -out /etc/pmta/pmta.key 2048 2>/dev/null
-    openssl rsa -in /etc/pmta/pmta.key -pubout -out /etc/pmta/pmta.pem 2>/dev/null
-    chmod 600 /etc/pmta/pmta.key /etc/pmta/pmta.pem
-    print_status "密钥对已生成：/etc/pmta/pmta.key 和 /etc/pmta/pmta.pem"
-}
-
-# 停止并移除占用 25 端口的邮件服务器
-remove_mail_servers() {
-    print_status "检查并移除占用 25 端口的现有邮件服务器..."
-
-    for service in postfix sendmail exim exim4; do
-        if systemctl is-active --quiet $service; then
-            print_warning "正在停止 $service..."
-            systemctl stop $service
-            systemctl disable $service
-        fi
-        if dpkg -l | grep -q "^ii  $service"; then
-            print_status "正在移除 $service..."
-            apt purge $service -y
-        fi
-    done
-
-    if netstat -tlnp | grep -q ":25 "; then
-        print_warning "正在杀死占用 25 端口的进程..."
-        fuser -k 25/tcp 2>/dev/null || true
-    fi
-
-    print_status "25 端口现已空闲。"
-}
-
-# 安装依赖
-install_deps() {
-    print_status "更新软件包列表并安装依赖..."
-    apt update
-    apt install -y alien vim curl unzip net-tools openssl
-}
-
-# 运行 cf_pmta
-run_cf_pmta() {
-    local cf_file="/etc/pmta/cf_pmta"
-
-
-    print_status "检查 cf_pmta 文件..."
-    if [[ ! -f "$cf_file" ]]; then
-        print_error "cf_pmta 文件不存在：$cf_file"
-    fi
-    if [[ ! -x "$cf_file" ]]; then
-        print_warning "cf_pmta 文件不可执行，正在设置执行权限..."
-        chmod 700 "$cf_file"
-        chown root:root "$cf_file"
-    fi
-
-    print_status "正在运行 cf_pmta..."
-    "$cf_file"
-    if [ $? -ne 0 ]; then
-        print_error "运行 cf_pmta 失败，请检查错误日志。"
-    fi
-
-
-
-read -p "手动保存IP和账户密码继续下一步？[Y/n]: " choice
-
-# 将用户的输入转换为小写，方便判断
-choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
-
-# 使用 case 语句进行判断
-case "$choice" in
-    "n")
-        echo "已选择退出。"
-        exit 1
-        ;;
-    "y" | "")
-        echo "继续执行下一步操作..."
-        # 在这里添加你的后续命令
-        echo "下一步操作已完成！"
-        ;;
-    *)
-        echo "输入无效，默认继续。"
-        echo "继续执行下一步操作..."
-        # 在这里添加你的后续命令
-        echo "下一步操作已完成！"
-        ;;
-esac
-
-
-    print_status "cf_pmta 运行成功，配置文件已生成。"
-}
-
-
-# 下载并安装 PowerMTA 和 cf_pmta
-install_powermta() {
-    local download_url="https://www.dropbox.com/scl/fi/won4kyoidiflxbpxwelbl/PMTA.zip?rlkey=4e5iz4fnbc05p0izt3fah3nqa&st=04uftyj9&dl=0"
-    local cf_download_url="https://www.dropbox.com/scl/fi/gtogid086exg58zewm3eo/cf_pmta?rlkey=4c4fwt2hg7cah1we8jygewc9k&st=z97e84ad&dl=0"
-    local zip_file="PMTA.zip"
-    local rpm_file="PowerMTA.rpm"
-    local cf_file="/etc/pmta/cf_pmta"
-
-    rm -rf license pmtad PowerMTA.rpm
-
-    if [[ -d /etc/pmta && -f /etc/pmta/license ]]; then
-        print_warning "PowerMTA 似乎已安装，检查证书和 cf_pmta..."
-        if [[ ! -f /etc/pmta/pmta.pem || ! -f /etc/pmta/pmta.key ]]; then
-            generate_keys
-        fi
-        if [[ ! -f /etc/pmta/cf_pmta ]]; then
-            print_status "正在下载 cf_pmta..."
-            curl -L -o "$cf_file" "$cf_download_url"
-            if [ $? -ne 0 ]; then
-                print_error "下载 cf_pmta 失败。"
-            fi
-            chmod 700 "$cf_file"
-            chown root:root "$cf_file"
-            print_status "正在运行 cf_pmta..."
-            "$cf_file"
-            if [ $? -ne 0 ]; then
-                print_error "运行 cf_pmta 失败。"
-            fi
+        print_status "未找到 jq，正在自动安装..."
+        apt-get update -y
+        apt-get install -y jq
+        if command -v jq >/dev/null 2>&1; then
+            print_status "jq 已成功安装。"
+            USE_JQ=true
         else
-            print_status "cf_pmta 已存在，重新运行..."
-            "$cf_file"
-            if [ $? -ne 0 ]; then
-                print_error "运行 cf_pmta 失败。"
+            print_error "无法安装 jq，请检查你的网络或仓库配置。"
+            print_warning "尝试使用 Python 解析 JSON..."
+            if command -v python3 >/dev/null 2>&1; then
+                USE_JQ=false
+            else
+                print_error "也未找到 python3，请手动安装 jq 或 python3。"
+                print_error "安装 jq：sudo apt-get install jq"
+                exit 1
             fi
         fi
-        print_status "正在重启 PowerMTA 服务..."
-        systemctl restart pmta || print_error "重启 PowerMTA 服务失败。"
-        return
+    fi
+}
+
+validate_variable() {
+    local var_name="$1"
+    local var_value="$2"
+    if [[ "$var_value" == *\'* || "$var_value" == *\"* || "$var_value" == *\;* ]]; then
+        print_error "$var_name 包含非法字符（单引号、双引号或分号）：$var_value"
+        exit 1
+    fi
+}
+
+cloudflare_api() {
+    local method="$1"
+    local endpoint="$2"
+    local data="$3"
+    local http_code
+    local curl_cmd
+
+    : > "$TEMP_RESPONSE_FILE"
+    : > "$LOG_DIR/cloudflare_http_code.txt"
+
+    curl_cmd=(curl -s -X "$method" "https://api.cloudflare.com/client/v4/$endpoint" \
+        -H "X-Auth-Email: $CLOUDFLARE_EMAIL" \
+        -H "X-Auth-Key: $CLOUDFLARE_API_KEY" \
+        -H "Content-Type: application/json")
+
+    if [ -n "$data" ]; then
+        curl_cmd+=(--data-raw "$data")
     fi
 
-    print_status "正在下载 PMTA.zip..."
-    curl -L -o "$zip_file" "$download_url"
-    if [ $? -ne 0 ]; then
-        print_error "下载 PMTA.zip 失败。"
+    print_status "执行 Cloudflare API: $method $endpoint"
+    if [ -n "$data" ]; then
+        print_status "请求数据: $data"
     fi
 
-    print_status "正在解压..."
-    unzip "$zip_file"
-    rm -f "$zip_file"
+    "${curl_cmd[@]}" -o "$TEMP_RESPONSE_FILE" -w "%{http_code}" > "$LOG_DIR/cloudflare_http_code.txt"
+    http_code=$(cat "$LOG_DIR/cloudflare_http_code.txt")
+    local response
+    response=$(cat "$TEMP_RESPONSE_FILE")
 
-    if [[ ! -f "license" || ! -f "pmtad" || ! -f "$rpm_file" ]]; then
-        print_error "下载的文件不完整：缺少 license、pmtad 或 $rpm_file。"
+    print_status "HTTP 状态码: $http_code"
+
+    if [ -z "$response" ]; then
+        print_error "Cloudflare API 无响应，请检查网络连接或 API 凭证。"
         exit 1
     fi
 
-    print_status "使用 alien 安装 RPM..."
-    alien -i "$rpm_file" --scripts
-    if [ $? -ne 0 ]; then
-        print_error "安装 PowerMTA RPM 失败。"
-    fi
-
-    print_status "复制 license 和 pmtad 文件..."
-    mkdir -p /etc/pmta
-    chmod 700 /etc/pmta
-    chown root:root /etc/pmta
-    cp license /etc/pmta/license
-    cp pmtad /usr/sbin/pmtad
-
-    # 生成证书
-    generate_keys
-
-    # 下载并运行 cf_pmta
-    print_status "正在下载 cf_pmta..."
-    curl -L -o "$cf_file" "$cf_download_url"
-    if [ $? -ne 0 ]; then
-        print_error "下载 cf_pmta 失败。"
-    fi
-    chmod 700 "$cf_file"
-    chown root:root "$cf_file"
-    print_status "正在运行 cf_pmta..."
-    "$cf_file"
-    if [ $? -ne 0 ]; then
-        print_error "运行 cf_pmta 失败。"
-    fi
-
-    rm -f license pmtad "$rpm_file"
-
-
-read -p "手动保存IP和账户密码继续下一步？[Y/n]: " choice
-
-# 将用户的输入转换为小写，方便判断
-choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
-
-# 使用 case 语句进行判断
-case "$choice" in
-    "n")
-        echo "已选择退出。"
-        exit 1
-        ;;
-    "y" | "")
-        echo "继续执行下一步操作..."
-        # 在这里添加你的后续命令
-        echo "下一步操作已完成！"
-        ;;
-    *)
-        echo "输入无效，默认继续。"
-        echo "继续执行下一步操作..."
-        # 在这里添加你的后续命令
-        echo "下一步操作已完成！"
-        ;;
-esac
-
-
-
-
-    print_status "PowerMTA 安装完成。"
-
-    # 启用并重启服务
-    if systemctl is-enabled pmta >/dev/null 2>&1; then
-        systemctl enable pmta
-        print_status "正在重启 PowerMTA 服务..."
-        systemctl restart pmta
-        if [ $? -ne 0 ]; then
-            print_error "重启 PowerMTA 服务失败。"
+    if "$USE_JQ"; then
+        if ! echo "$response" | jq -e . >/dev/null 2>&1; then
+            print_error "Cloudflare API 返回无效 JSON，已写入 $TEMP_RESPONSE_FILE"
+            exit 1
         fi
     else
-        print_warning "PowerMTA 服务未配置 systemd 单元，请手动启用和启动。"
+        if ! python3 -c "import json, os; json.loads(open(os.environ.get('TEMP_RESPONSE_FILE')).read())" >/dev/null 2>&1; then
+            print_error "Cloudflare API 返回无效 JSON，已写入 $TEMP_RESPONSE_FILE"
+            exit 1
+        fi
+    fi
+
+    if [ "$http_code" -ge 400 ]; then
+        print_error "Cloudflare API 返回 HTTP 错误: $http_code"
+        print_error "响应已写入 $TEMP_RESPONSE_FILE"
+        exit 1
+    fi
+
+    if "$USE_JQ"; then
+        if echo "$response" | jq -e '.success == false' >/dev/null; then
+            error_msg=$(echo "$response" | jq -r '.errors[0].message // "未知错误"')
+            print_error "Cloudflare API 错误: $error_msg"
+            print_error "响应已写入 $TEMP_RESPONSE_FILE"
+            exit 1
+        fi
+    else
+        error_msg=$(python3 -c "import json, os; data=json.loads(open(os.environ.get('TEMP_RESPONSE_FILE')).read()); print(data['errors'][0]['message'] if data.get('success') == False else '')" TEMP_RESPONSE_FILE="$TEMP_RESPONSE_FILE")
+        if [ -n "$error_msg" ]; then
+            print_error "Cloudflare API 错误: $error_msg"
+            print_error "响应已写入 $TEMP_RESPONSE_FILE"
+            exit 1
+        fi
+    fi
+
+    cat "$TEMP_RESPONSE_FILE"
+}
+
+get_external_ip() {
+    print_status "正在获取外网 IP 地址..."
+    EXTERNAL_IP=$(curl -s ifconfig.me)
+    if [ -z "$EXTERNAL_IP" ]; then
+        print_error "无法获取外网 IP 地址"
+        exit 1
+    fi
+    validate_variable "EXTERNAL_IP" "$EXTERNAL_IP"
+    print_status "外网 IP：$EXTERNAL_IP"
+}
+
+check_dns_record() {
+    local type="$1"
+    local name="$2"
+    local content="$3"
+    local response
+    response=$(cloudflare_api GET "zones/$ZONE_ID/dns_records?name=$name&type=$type")
+
+    if "$USE_JQ"; then
+        if echo "$response" | jq -e --arg content "$content" '.result[] | select(.content == $content)' >/dev/null 2>&1; then
+            return 0
+        else
+            return 1
+        fi
+    else
+        if python3 -c "import json, os; data=json.loads(os.environ.get('RESPONSE')); exit(0 if any(r['content'] == os.environ.get('CONTENT') for r in data['result']) else 1)" RESPONSE="$response" CONTENT="$content" >/dev/null 2>&1; then
+            return 0
+        else
+            return 1
+        fi
     fi
 }
 
-# 重新加载配置文件
-reload_config() {
-    print_status "正在重新加载 PowerMTA 配置文件..."
-    systemctl reload pmta || print_warning "重新加载失败，服务可能未运行。"
-}
+delete_all_records() {
+    print_status "正在获取并删除域名 $MAIN_DOMAIN 的所有 DNS 记录..."
+    local records
+    local response
+    response=$(cloudflare_api GET "zones/$ZONE_ID/dns_records")
 
-# 重启服务
-restart_service() {
-    print_status "正在重启 PowerMTA..."
-    systemctl restart pmta || print_error "重启 PowerMTA 服务失败。"
-}
-
-# 启动服务
-start_service() {
-    print_status "正在启动 PowerMTA..."
-    systemctl start pmta || print_error "启动 PowerMTA 服务失败。"
-}
-
-# 停止服务
-stop_service() {
-    print_status "正在停止 PowerMTA..."
-    systemctl stop pmta || print_warning "停止 PowerMTA 服务失败，服务可能已停止。"
-}
-
-# 检查服务状态
-check_status() {
-    print_status "PowerMTA 服务状态："
-    systemctl status pmta || print_error "无法获取 PowerMTA 服务状态。"
-}
-
-# 分析日志文件
-analyze_log() {
-    local log_file="/var/log/pmta/acct.log"
-
-    if [[ ! -f "$log_file" ]]; then
-        print_error "日志文件 $log_file 不存在！"
-        return 1
+    if "$USE_JQ"; then
+        records=$(echo "$response" | jq -r '.result[] | select(.name | endswith(".'$MAIN_DOMAIN'")) | .id // empty')
+    else
+        records=$(python3 -c "import json, os; data=json.loads(open(os.environ.get('TEMP_RESPONSE_FILE')).read()); print('\n'.join(r['id'] for r in data['result'] if r['name'].endswith(os.environ.get('MAIN_DOMAIN'))))" TEMP_RESPONSE_FILE="$TEMP_RESPONSE_FILE" MAIN_DOMAIN="$MAIN_DOMAIN")
     fi
 
-    print_status "正在分析所有域名的邮件发送数据..."
-
-    domains=$(grep -oP "rcpt_domain=\K[^ ]+" "$log_file" | sort -u)
-
-    if [ -z "$domains" ]; then
-        print_error "日志文件中未找到任何域名！"
-        return 1
+    if [ -n "$records" ]; then
+        for id in $records; do
+            cloudflare_api DELETE "zones/$ZONE_ID/dns_records/$id"
+            print_status "已删除记录 ID: $id"
+        done
+        print_status "所有旧 DNS 记录已成功删除。"
+    else
+        print_status "未找到 $MAIN_DOMAIN 的 DNS 记录，跳过删除。"
     fi
-
-    printf "\n%-30s %-15s %-15s %-15s %-15s\n" "域名" "成功发送" "总退信" "硬退信" "软退信"
-    printf "%s\n" "-----------------------------------------------------------------------"
-
-    while IFS= read -r domain; do
-        success_count=$(grep "rcpt_domain=$domain" "$log_file" | grep "event=smtp" | wc -l)
-        bounce_count=$(grep "rcpt_domain=$domain" "$log_file" | grep "event=bounce" | wc -l)
-        hard_bounce_count=$(grep "rcpt_domain=$domain" "$log_file" | grep "event=bounce" | grep "dsn=5" | wc -l)
-        soft_bounce_count=$(grep "rcpt_domain=$domain" "$log_file" | grep "event=bounce" | grep "dsn=4" | wc -l)
-        printf "%-30s %-15s %-15s %-15s %-15s\n" "$domain" "$success_count" "$bounce_count" "$hard_bounce_count" "$soft_bounce_count"
-    done <<< "$domains"
-
-    print_status "日志分析完成。"
 }
 
-# 卸载 PowerMTA
-uninstall_powermta() {
-    print_warning "正在卸载 PowerMTA..."
+add_dns_records() {
+    local json_data
 
-    stop_service
+    print_status "开始添加 DNS 记录..."
+    if ! check_dns_record "A" "mail.$DOMAIN" "$EXTERNAL_IP"; then
+        print_status "正在添加 A 记录：mail.$DOMAIN -> $EXTERNAL_IP"
+        json_data=$(jq -n --arg ip "$EXTERNAL_IP" '{type: "A", name: "mail", content: $ip, ttl: 1, proxied: false}')
+        cloudflare_api POST "zones/$ZONE_ID/dns_records" "$json_data"
+    else
+        print_status "A 记录已存在：mail.$DOMAIN -> $EXTERNAL_IP，跳过添加"
+    fi
 
-    systemctl disable pmta 2>/dev/null || true
-    rm -f /etc/systemd/system/pmta.service 2>/dev/null || true
+    if ! check_dns_record "A" "$MAIN_DOMAIN" "$EXTERNAL_IP"; then
+        print_status "正在添加 A 记录：$MAIN_DOMAIN -> $EXTERNAL_IP"
+        json_data=$(jq -n --arg ip "$EXTERNAL_IP" '{type: "A", name: "@", content: $ip, ttl: 1, proxied: false}')
+        cloudflare_api POST "zones/$ZONE_ID/dns_records" "$json_data"
+    else
+        print_status "A 记录已存在：$MAIN_DOMAIN -> $EXTERNAL_IP，跳过添加"
+    fi
+
+    if ! check_dns_record "MX" "$MAIN_DOMAIN" "mail.$DOMAIN"; then
+        print_status "正在添加 MX 记录：@ -> mail.$DOMAIN"
+        json_data=$(jq -n --arg mx "mail.$DOMAIN" '{type: "MX", name: "@", content: $mx, priority: 10, ttl: 1}')
+        cloudflare_api POST "zones/$ZONE_ID/dns_records" "$json_data"
+    else
+        print_status "MX 记录已存在：@ -> mail.$DOMAIN，跳过添加"
+    fi
+
+    local spf_value="v=spf1 a mx ip4:$EXTERNAL_IP ~all"
+    if ! check_dns_record "TXT" "$MAIN_DOMAIN" "$spf_value"; then
+        print_status "正在添加 SPF TXT 记录..."
+        json_data=$(jq -n --arg spf "$spf_value" '{type: "TXT", name: "@", content: $spf, ttl: 1}')
+        cloudflare_api POST "zones/$ZONE_ID/dns_records" "$json_data"
+    else
+        print_status "SPF 记录已存在：$spf_value，跳过添加"
+    fi
+
+    local dmarc_value="v=DMARC1; p=quarantine; rua=mailto:dmarc@$DOMAIN"
+    if ! check_dns_record "TXT" "_dmarc.$MAIN_DOMAIN" "$dmarc_value"; then
+        print_status "正在添加 DMARC TXT 记录..."
+        json_data=$(jq -n --arg dmarc "$dmarc_value" '{type: "TXT", name: "_dmarc", content: $dmarc, ttl: 1}')
+        cloudflare_api POST "zones/$ZONE_ID/dns_records" "$json_data"
+    else
+        print_status "DMARC 记录已存在：$dmarc_value，跳过添加"
+    fi
+
+    print_status "DNS 记录添加完成！"
+}
+
+get_zone_id() {
+    print_status "获取 Cloudflare 区域 ID..."
+    local zones_response
+    zones_response=$(cloudflare_api GET zones)
+
+    local parts
+    IFS='.' read -r -a parts <<< "$DOMAIN"
+    local parent=""
+    if [ ${#parts[@]} -ge 2 ]; then
+        parent="${parts[-2]}.${parts[-1]}"
+    fi
+    validate_variable "parent" "$parent"
+
+    local zone_id_candidate=""
+    if [ -n "$parent" ]; then
+        zone_id_candidate=$(echo "$zones_response" | jq -r --arg d "$parent" '.result[] | select(.name == $d) | .id')
+    fi
+    if [ -z "$zone_id_candidate" ] || [ "$zone_id_candidate" == "null" ]; then
+        zone_id_candidate=$(echo "$zones_response" | jq -r --arg d "$DOMAIN" '.result[] | select(.name == $d) | .id')
+        if [ -n "$zone_id_candidate" ] && [ "$zone_id_candidate" != "null" ]; then
+            MAIN_DOMAIN="$DOMAIN"
+        fi
+    else
+        MAIN_DOMAIN="$parent"
+    fi
+
+    if [ -z "$zone_id_candidate" ]; then
+        print_error "未找到匹配的 Cloudflare 区域。"
+        exit 1
+    fi
+
+    ZONE_ID="$zone_id_candidate"
+    print_status "找到区域：$MAIN_DOMAIN，ID：$ZONE_ID"
+}
+
+check_system() {
+    print_status "正在执行系统环境检查..."
+    if [[ $EUID -ne 0 ]]; then
+        print_error "此脚本必须以 root 身份运行！"
+        exit 1
+    fi
+
+    ulimit -n 102400
+    print_status "ulimit -n 已设置为 102400。"
+
+    if netstat -tln | grep -q ':25'; then
+        print_warning "检测到 25 端口正在被占用。请确认是 Postfix 或其他邮件系统在使用。"
+    else
+        print_status "25 端口未被占用。"
+    fi
+
+    print_status "检查其他邮件系统..."
+    if dpkg -s exim4 >/dev/null 2>&1 || dpkg -s sendmail >/dev/null 2>&1; then
+        print_warning "检测到其他邮件系统（exim4 或 sendmail）。"
+        read -p "是否卸载这些系统？(y/n) [Y]: " confirm
+        confirm=${confirm: -y}
+        if [[ "$confirm" =~ ^[yY]$ ]]; then
+            print_status "正在卸载 exim4 和 sendmail..."
+            apt-get purge -y exim4 sendmail
+            apt-get autoremove -y
+            print_status "其他邮件系统已卸载。"
+        else
+            print_status "已取消卸载。"
+        fi
+    else
+        print_status "未检测到其他邮件系统。"
+    fi
+}
+
+uninstall_all() {
+    print_status "正在卸载所有邮件相关组件..."
+    service postfix stop || true
+    service opendkim stop || true
+    service saslauthd stop || true
+    apt-get purge -y postfix opendkim opendkim-tools postfix-policyd-spf-python sasl2-bin libsasl2-modules
+    apt-get autoremove -y
+    print_status "所有邮件相关组件已成功卸载。"
+}
+
+generate_self_signed_cert() {
+    print_status "正在生成自签名 SSL/TLS 证书..."
+
+    mkdir -p "$CERT_DIR"
+    service postfix stop || true
+
+    openssl genrsa -out "$KEY_FILE" 2048
+    openssl req -new -key "$KEY_FILE" -out "$CERT_DIR/smtpd.csr" -subj "/C=US/ST=State/L=City/O=Self-Signed/CN=mail.$DOMAIN"
+    openssl x509 -req -days 365 -in "$CERT_DIR/smtpd.csr" -signkey "$KEY_FILE" -out "$CERT_FILE"
+
+    chmod 600 "$KEY_FILE"
+    chmod 644 "$CERT_FILE"
+    print_status "自签名证书已生成，位于 $CERT_FILE"
+    service postfix start || true
+}
+
+configure_postfix() {
+    print_status "正在配置 Postfix main.cf..."
+
+    cp /etc/postfix/main.cf /etc/postfix/main.cf.bak
+
+    cat > /etc/postfix/main.cf <<EOF
+myhostname = $DOMAIN
+mydomain = $DOMAIN
+myorigin = \$mydomain
+inet_interfaces = all
+default_process_limit = 500
+default_destination_concurrency_limit = 3
+initial_destination_concurrency = 3
+smtp_destination_concurrency_limit = 10
+smtp_destination_rate_delay = 3s
+minimal_backoff_time = 300s
+maximal_backoff_time = 4000s
+maximal_queue_lifetime = 1d
+inet_protocols = all
+mydestination = localhost
+local_recipient_maps =
+relay_domains =
+relayhost =
+mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128 $EXTERNAL_IP/32
+mailbox_size_limit = 0
+recipient_delimiter = +
+virtual_alias_maps = hash:/etc/postfix/virtual
+smtpd_use_tls = yes
+smtpd_tls_cert_file = $CERT_FILE
+smtpd_tls_key_file = $KEY_FILE
+smtpd_tls_security_level = may
+smtp_tls_security_level = may
+smtpd_sasl_auth_enable = yes
+smtpd_sasl_type = cyrus
+smtpd_sasl_path = smtpd
+smtpd_sasl_security_options = noanonymous
+broken_sasl_auth_clients = yes
+smtpd_recipient_restrictions =
+    permit_mynetworks,
+    permit_sasl_authenticated,
+    reject_unauth_destination,
+    check_policy_service unix:private/policy-spf
+header_checks = regexp:/etc/postfix/header_checks
+milter_default_action = accept
+milter_protocol = 2
+smtpd_milters = inet:localhost:8891
+non_smtpd_milters = inet:localhost:8891
+EOF
+
+    print_status "正在配置 Postfix master.cf..."
+    cp /etc/postfix/master.cf /etc/postfix/master.cf.bak
+
+    # 清除旧的 submission 和 smtps 配置
+    sed -i '/^submission/d; /^smtps/d;' /etc/postfix/master.cf
+
+    # 重新添加 submission 和 smtps 配置
+    cat >> /etc/postfix/master.cf <<EOF
+
+submission inet n       -       y       -       -       smtpd
+  -o syslog_name=postfix/submission
+  -o smtpd_tls_security_level=encrypt
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_sasl_type=cyrus
+  -o smtpd_sasl_path=smtpd
+  -o smtpd_sasl_security_options=noanonymous
+  -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+
+smtps     inet  n       -       y       -       -       smtpd
+  -o syslog_name=postfix/smtps
+  -o smtpd_tls_wrappermode=yes
+  -o smtpd_tls_security_level=encrypt
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_sasl_type=cyrus
+  -o smtpd_sasl_path=smtpd
+  -o smtpd_sasl_security_options=noanonymous
+  -o smtpd_client_restrictions=permit_sasl_authenticated,reject
+EOF
+
+    # 修复 sed 语法错误，使用正确的语法来添加 smtpd_tls_security_level=may
+    sed -i -e '/^smtp[[:space:]][[:space:]]*inet[[:space:]]/s/$/ -o smtpd_tls_security_level=may/' /etc/postfix/master.cf
+
+    print_status "正在配置邮件头优化..."
+    cat > /etc/postfix/header_checks <<EOF
+/^Received: from.*/ IGNORE
+/^List-Unsubscribe:/ IGNORE
+/^List-Unsubscribe-Post:/ IGNORE
+/^List-ID:/ IGNORE
+/^Reply-To:/ IGNORE
+/^Feedback-ID:/ IGNORE
+EOF
+    postmap /etc/postfix/header_checks
+}
+
+configure_policyd() {
+    print_status "正在配置 Postfix Policyd (postfix-policyd-spf-python)..."
+    if ! grep -q "policy-spf" /etc/postfix/master.cf; then
+        print_status "添加 policy-spf 配置到 master.cf..."
+        echo "policy-spf unix - n n - - spawn user=policyd-spf argv=/usr/bin/policyd-spf" >> /etc/postfix/master.cf
+    else
+        print_status "master.cf 已包含 policy-spf 配置。"
+    fi
+}
+
+configure_sasl() {
+    print_status "正在配置 SASL 认证..."
+    mkdir -p /etc/postfix/sasl
+
+    print_status "写入 /etc/postfix/sasl/smtpd.conf ..."
+    cat > /etc/postfix/sasl/smtpd.conf <<EOF
+pwcheck_method: saslauthd
+mech_list: plain login
+EOF
+
+    print_status "创建 SMTP 认证账户..."
+    echo "$SMTP_PASS" | saslpasswd2 -c -u "$DOMAIN" "$SMTP_USER"
+
+    if [ -f /etc/sasldb2 ]; then
+        chown root:sasl /etc/sasldb2
+        chmod 640 /etc/sasldb2
+        adduser postfix sasl || true
+    fi
+
+  if [ -f "/etc/default/saslauthd" ]; then
+        sed -i 's/^MECHANISMS=.*/MECHANISMS="sasldb"/' /etc/default/saslauthd
+        sed -i 's/^START=.*/START=yes/' /etc/default/saslauthd
+        # 删除所有旧的 SOCKETDIR 和 OPTIONS 行
+        sed -i '/^SOCKETDIR=/d' /etc/default/saslauthd
+        sed -i '/^OPTIONS=/d' /etc/default/saslauthd
+        # 添加用户指定的 OPTIONS 行，以解决 chroot 认证问题
+        echo 'OPTIONS="-c -m /var/spool/postfix/var/run/saslauthd"' >> /etc/default/saslauthd
+		echo 'START=yes' >> /etc/default/saslauthd
+    fi
+    
+    # 修复了 master.cf 中的 smtpd_sasl_path 问题
+    # smtpd_sasl_path=smtpd
+    # 这一行在 master.cf 的 smtps 和 submission 服务中已经有了
+
+    # Postfix chroot 兼容性修正：saslauthd socket 软链接
+    SASLAUTHD_RUN_DIR="/var/run/saslauthd"
+    POSTFIX_SASLAUTHD_RUN_DIR="/var/spool/postfix/var/run/saslauthd"
+    if [ -d "$SASLAUTHD_RUN_DIR" ]; then
+        mkdir -p "$POSTFIX_SASLAUTHD_RUN_DIR"
+        rm -f "$POSTFIX_SASLAUTHD_RUN_DIR/mux"
+        ln -s "$SASLAUTHD_RUN_DIR/mux" "$POSTFIX_SASLAUTHD_RUN_DIR/mux"
+    fi
+	
+	#=========================================#=========================================
+	print_status "检查 Postfix 虚拟别名映射文件..."
+
+    # Check if files exist
+    print_status "检查 /etc/postfix/virtual 和 /etc/postfix/virtual.db ..."
+    ls -la /etc/postfix/virtual /etc/postfix/virtual.db 2>/dev/null || {
+        print_status "一个或多个文件不存在，继续处理..."
+    }
+
+    # Create /etc/postfix/virtual if it doesn't exist
+    if [ ! -f /etc/postfix/virtual ]; then
+        print_status "创建空文件 /etc/postfix/virtual ..."
+        touch /etc/postfix/virtual || print_error "无法创建 /etc/postfix/virtual"
+    else
+        print_status "/etc/postfix/virtual 已存在，跳过创建"
+    fi
+
+    # Generate hash table
+    print_status "生成 hash 表 /etc/postfix/virtual.db ..."
+    postmap /etc/postfix/virtual || print_error "无法生成 /etc/postfix/virtual.db"
+
+    # Verify hash table
+    print_status "验证 /etc/postfix/virtual.db 是否生成..."
+    if ls -la /etc/postfix/virtual.db >/dev/null 2>&1; then
+        print_status "/etc/postfix/virtual.db 已成功生成"
+    else
+        print_error "/etc/postfix/virtual.db 未生成"
+    fi
+	#=========================================#=========================================
+
+    print_status "重启 saslauthd 服务..."
+    service saslauthd restart
+    print_status "SASL 认证配置完成！"
+}
+
+configure_opendkim() {
+    print_status "配置 OpenDKIM..."
+    
+    # 确保 OpenDKIM 目录存在并设置权限
+    mkdir -p /etc/opendkim
+    chown -R opendkim:opendkim /etc/opendkim
+    
+    # 生成 KeyTable
+    print_status "正在生成 KeyTable..."
+    echo "$DKIM_SELECTOR._domainkey.$MAIN_DOMAIN $MAIN_DOMAIN:$DKIM_SELECTOR:/etc/dkimkeys/$MAIN_DOMAIN/$DKIM_SELECTOR.private" > /etc/opendkim/KeyTable
+    chmod 644 /etc/opendkim/KeyTable
+    
+    # 生成 SigningTable
+    print_status "正在生成 SigningTable..."
+    echo "*@$MAIN_DOMAIN $DKIM_SELECTOR._domainkey.$MAIN_DOMAIN" > /etc/opendkim/SigningTable
+    chmod 644 /etc/opendkim/SigningTable
+    
+    # 生成 TrustedHosts
+    print_status "正在生成 TrustedHosts..."
+    echo "127.0.0.1" > /etc/opendkim/TrustedHosts
+    echo "localhost" >> /etc/opendkim/TrustedHosts
+    chmod 644 /etc/opendkim/TrustedHosts
+
+    print_status "配置 opendkim.conf..."
+    # 备份 opendkim.conf
+    cp /etc/opendkim.conf /etc/opendkim.conf.bak
+    
+    # 清空并重新生成 opendkim.conf
+    cat > /etc/opendkim.conf <<EOF
+PidFile /var/run/opendkim/opendkim.pid
+Mode    sv
+UMask   002
+OversignHeaders From
+Syslog  yes
+LogWhy  yes
+
+# 外部和内部主机列表
+ExternalIgnoreList      refile:/etc/opendkim/TrustedHosts
+InternalHosts           refile:/etc/opendkim/TrustedHosts
+
+# 密钥和签名表
+KeyTable                refile:/etc/opendkim/KeyTable
+SigningTable            refile:/etc/opendkim/SigningTable
+
+# DKIM 代理套接字
+Socket                  inet:8891@localhost
+EOF
+    
+    # 添加 User 和 Group 到 opendkim.service
+    print_status "正在配置 opendkim.service..."
+    local service_file="/lib/systemd/system/opendkim.service"
+    if [ -f "$service_file" ] && ! grep -q '^User=' "$service_file"; then
+        sed -i '/^\[Service\]/aUser=opendkim\nGroup=opendkim' "$service_file"
+        print_status "已添加 User 和 Group 到 opendkim.service。"
+    else
+        print_status "opendkim.service 已包含用户配置，跳过修改。"
+    fi
+
+    # 重新加载 systemd 配置
     systemctl daemon-reload
 
-    rm -rf /etc/pmta
-    rm -f /usr/sbin/pmtad
-
-    dpkg -l | grep -q power || true
-    apt purge power* -y 2>/dev/null || true
-
-    print_status "PowerMTA 已卸载。"
+    print_status "opendkim.conf 配置完成。"
 }
 
-# 交互式菜单
-show_menu() {
-    clear
-    local service_status
-    service_status=$(get_service_status)
-    echo ""
-    echo "=== PowerMTA 管理菜单 ==="
-    echo "当前 PowerMTA 服务状态：$service_status"
-    echo "1. 安装 PowerMTA（包括依赖、移除邮件服务器、下载 cf_pmta、生成证书）"
-    echo "2. 运行 Cloudflera配置"
-    echo "3. 重启服务"
-    echo "4. 启动服务"
-    echo "5. 停止服务"
-    echo "6. 检查服务状态"
-    echo "7. 分析日志文件"
-    echo "8. 卸载 PowerMTA"
-    echo "9. 重新加载配置文件"
-    echo "0. 退出"
-    echo ""
-    read -p "请选择一个选项： " choice
-    clear
-    case $choice in
-        1) remove_mail_servers; install_deps; install_powermta ;;
-        2) run_cf_pmta ;;
-        3) restart_service ;;
-        4) start_service ;;
-        5) stop_service ;;
-        6) check_status ;;
-        7) analyze_log ;;
-        8) uninstall_powermta ;;
-        9) reload_config ;;
-        0) exit 0 ;;
-        *) print_error "无效选项，请重试。" ;;
-    esac
+install_postfix() {
+    check_system
+
+    if dpkg -s postfix >/dev/null 2>&1; then
+        print_status "Postfix 已安装。"
+        read -p "是否卸载现有 Postfix 并重新安装？(y/n) [Y]: " confirm
+        confirm=${confirm: -y}
+        if [[ "$confirm" =~ ^[yY]$ ]]; then
+            uninstall_all
+        else
+            print_status "已取消重新安装。请注意，不重新安装可能导致配置冲突。"
+            return
+        fi
+    else
+        print_status "Postfix 未安装。"
+    fi
+
+    print_status "正在更新系统包列表..."
+    apt-get update -y
+
+    print_status "正在安装 Postfix、OpenDKIM、Postfix Policyd 和 SASL..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y postfix opendkim opendkim-tools postfix-policyd-spf-python sasl2-bin libsasl2-modules
+
+    SMTP_USER="smtp_$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
+    SMTP_PASS="$(openssl rand -base64 12)"
+    mkdir -p "$SCRIPT_DIR/smtp"
+    echo "$SMTP_USER:$SMTP_PASS" > "$SCRIPT_DIR/smtp/credentials"
+    chmod 600 "$SCRIPT_DIR/smtp/credentials"
+    print_status "SMTP 账户已生成，并保存到 $SCRIPT_DIR/smtp/credentials"
+
+    get_external_ip
+    get_zone_id
+
+    read -p "是否删除 $MAIN_DOMAIN 的所有现有 DNS 记录？(y/n) [Y]: " confirm_delete
+    confirm_delete=${confirm_delete: -y}
+    if [[ "$confirm_delete" =~ ^[yY]$ ]]; then
+        delete_all_records
+    fi
+
+    add_dns_records
+
+    print_status "正在生成 DKIM 密钥..."
+    local selector="$DKIM_SELECTOR"
+    local dkim_dir="/etc/dkimkeys/$MAIN_DOMAIN"
+    mkdir -p "$dkim_dir"
+    cd "$dkim_dir"
+    opendkim-genkey -b 2048 -d "$MAIN_DOMAIN" -s "$selector" -v
+    print_status "DKIM 密钥已生成在 $dkim_dir"
+
+    # 修复密钥文件权限
+    print_status "正在修复 DKIM 密钥文件权限..."
+    chown -R opendkim:opendkim "$dkim_dir"
+    chmod -R 700 "$dkim_dir"
+    print_status "DKIM 密钥文件权限已修复。"
+
+    # 修正：提取正确的 DKIM 公钥内容，去除所有不必要的格式和空格。
+    print_status "正在从密钥文件中提取 DKIM 公钥..."
+    local dkim_public_key
+    # 这一行是本次修正的关键。它会提取出所有双引号中的内容，然后去除引号和所有空格，将多行内容拼接成一行。
+    dkim_public_key=$(grep -oP '".*"' "$selector.txt" | tr -d '"' | tr -d ' ' | tr -d '\n' | tr -d '\t')
+    
+    if ! check_dns_record "TXT" "$selector._domainkey.$MAIN_DOMAIN" "$dkim_public_key"; then
+        print_status "正在添加 DKIM TXT 记录..."
+        local dkim_name="$selector._domainkey"
+        local json_data=$(jq -n --arg name "$dkim_name" --arg content "$dkim_public_key" '{type: "TXT", name: $name, content: $content, ttl: 1}')
+        cloudflare_api POST "zones/$ZONE_ID/dns_records" "$json_data"
+        print_status "DKIM TXT 记录已成功添加。"
+    else
+        print_status "DKIM TXT 记录已存在，跳过添加。"
+    fi
+
+    generate_self_signed_cert
+    configure_postfix
+    configure_policyd
+    configure_sasl
+    configure_opendkim
+    restart_all_services
+
+    print_status "Postfix、OpenDKIM 和 Postfix Policyd 安装和配置完成！"
+    print_status "请验证 Cloudflare DNS 记录是否已生效。"
 }
 
-# 主程序
+stop_all_services() {
+    print_status "正在停止所有邮件服务..."
+    service postfix stop || true
+    service opendkim stop || true
+    service saslauthd stop || true
+    print_status "所有服务已停止。"
+}
+
+view_smtp_details() {
+    if [ -z "$DOMAIN" ]; then
+        print_error "请先运行安装脚本以设置域名和账户信息。"
+        sleep 3
+        return
+    fi
+    print_status "SMTP 账户信息："
+    echo -e "IP 地址: ${GREEN}$EXTERNAL_IP${NC}"
+    echo -e "IP 端口: ${GREEN}465 (SMTPS), 587 (STARTTLS)${NC}"
+    echo -e "邮箱 地址: ${GREEN}no-reply@${DOMAIN}${NC}"
+    if [ -f "$SCRIPT_DIR/smtp/credentials" ]; then
+        local user=$(cut -d':' -f1 "$SCRIPT_DIR/smtp/credentials")
+        local pass=$(cut -d':' -f2 "$SCRIPT_DIR/smtp/credentials")
+        echo -e "SMTP 账号: ${GREEN}${user}@${DOMAIN}${NC}"
+        echo -e "SMTP 密码: ${GREEN}$pass${NC}"
+    else
+        print_warning "未找到 SMTP 凭证文件，请先安装 Postfix。"
+    fi
+    read -p "按 Enter 继续..."
+}
+
+get_user_input() {
+    print_status "正在执行初步检测..."
+    check_json_parser
+
+    if [ -f "$CONFIG_FILE" ]; then
+        print_status "加载配置文件：$CONFIG_FILE"
+        source "$CONFIG_FILE"
+    fi
+
+    if [ -z "$CLOUDFLARE_EMAIL" ]; then
+        read -p "请输入您的 Cloudflare 邮箱: " CLOUDFLARE_EMAIL
+    fi
+    if [ -z "$CLOUDFLARE_API_KEY" ]; then
+        read -p "请输入您的 Cloudflare API 密钥: " CLOUDFLARE_API_KEY
+    fi
+    if [ -z "$DOMAIN" ]; then
+        read -p "请输入您的域名 (例如：example.com 或 sub.example.com): " DOMAIN
+    fi
+
+    validate_variable "CLOUDFLARE_EMAIL" "$CLOUDFLARE_EMAIL"
+    validate_variable "CLOUDFLARE_API_KEY" "$CLOUDFLARE_API_KEY"
+    validate_variable "DOMAIN" "$DOMAIN"
+
+    if [ -z "$CLOUDFLARE_EMAIL" ] || [ -z "$CLOUDFLARE_API_KEY" ] || [ -z "$DOMAIN" ]; then
+        print_error "Cloudflare 邮箱、API 密钥和域名不能为空。"
+        exit 1
+    fi
+
+    cat > "$CONFIG_FILE" <<EOF
+CLOUDFLARE_EMAIL="$CLOUDFLARE_EMAIL"
+CLOUDFLARE_API_KEY="$CLOUDFLARE_API_KEY"
+DOMAIN="$DOMAIN"
+EOF
+    chmod 600 "$CONFIG_FILE"
+
+    get_external_ip
+    get_zone_id
+
+    hostnamectl set-hostname mail.$DOMAIN
+    print_status "主机名已设置为 mail.$DOMAIN"
+}
+
+check_postfix_status() {
+    if dpkg -s postfix >/dev/null 2>&1; then
+        print_status "Postfix 已安装。"
+        service postfix status | cat
+    else
+        print_warning "Postfix 未安装。"
+    fi
+    sleep 5
+}
+
+restart_all_services() {
+    print_status "正在重启 OpenDKIM 服务..."
+    service opendkim restart || true
+    print_status "正在重启 saslauthd 服务..."
+    service saslauthd restart || true
+    print_status "正在重启 Postfix 服务..."
+    service postfix restart || true
+    print_status "所有服务已重启。"
+    read -p "按 Enter 继续..."
+}
+
+view_queue() {
+    print_status "正在查看 Postfix 队列..."
+    mailq
+    read -p "按 Enter 继续..."
+}
+
+flush_queue() {
+    print_status "正在刷新 Postfix 队列..."
+    postfix flush
+    read -p "按 Enter 继续..."
+}
+
+delete_queue() {
+    read -p "确定要删除所有 Postfix 队列邮件吗？(y/n) [Y]: " confirm
+    confirm=${confirm: -y}
+    if [[ "$confirm" =~ ^[yY]$ ]]; then
+        print_status "正在删除所有 Postfix 队列邮件..."
+        postsuper -d ALL
+        print_status "队列已清空。正在重启服务..."
+        service postfix restart
+        service opendkim restart
+        service saslauthd restart
+        print_status "所有服务已重启。"
+    else
+        print_status "已取消删除队列。"
+    fi
+    read -p "按 Enter 继续..."
+}
+
+view_logs() {
+    print_status "正在查看日志..."
+    tail -n 100 "$LOG_FILE"
+    read -p "按 Enter 继续..."
+}
+
+delete_logs() {
+    read -p "确定要删除所有日志吗？(y/n) [Y]: " confirm
+    confirm=${confirm: -y}
+    if [[ "$confirm" =~ ^[yY]$ ]]; then
+        print_status "正在删除日志..."
+        rm -f "$LOG_FILE"
+        print_status "日志已删除。"
+        init_logs
+    else
+        print_status "已取消删除日志。"
+    fi
+    read -p "按 Enter 继续..."
+}
+
+show_main_menu() {
+    echo "=== Postfix 管理脚本 ==="
+    echo "1. 安装/卸载所有邮件服务"
+    echo "2. Postfix 管理"
+    echo "3. Postfix 队列管理"
+    echo "4. Postfix 日志管理"
+    echo "5. 退出"
+    echo "========================="
+}
+
 main() {
-    check_root
-    detect_ubuntu
+    init_logs
+    get_user_input
 
     while true; do
-        show_menu
+        clear
+        show_main_menu
+        read -p "输入选择: " choice
+        case $choice in
+            1)
+                install_uninstall_menu
+                ;;
+            2)
+                postfix_management_menu
+                ;;
+            3)
+                queue_management_menu
+                ;;
+            4)
+                log_management_menu
+                ;;
+            5)
+                print_status "退出脚本。"
+                exit 0
+                ;;
+            *)
+                print_error "无效选择，请重新输入。"
+                sleep 1
+                ;;
+        esac
     done
 }
 
-# 如果脚本直接运行，调用主程序
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main
-fi
+install_uninstall_menu() {
+    while true; do
+        clear
+        echo "=== 安装/卸载 ==="
+        echo "1. 安装 Postfix、DKIM 和 Policyd Saslauthd .."
+        echo "2. 卸载所有相关邮件服务"
+        echo "3. 查看 Postfix 状态"
+        echo "q. 返回主菜单"
+        echo "========================"
+        read -p "输入选择: " choice
+        case $choice in
+            1) install_postfix ; read -p "按 Enter 继续..." ;;
+            2) uninstall_all ; read -p "按 Enter 继续..." ;;
+            3) check_postfix_status ;;
+            q|Q) return ;;
+            *) print_error "无效选择。" ; sleep 1 ;;
+        esac
+    done
+}
+
+postfix_management_menu() {
+    while true; do
+        clear
+        echo "=== Postfix 管理 ==="
+        echo "1. 重启所有服务"
+        echo "2. 查看 main.cf 配置"
+        echo "3. 查看 DKIM 密钥文件"
+        echo "4. 查看 Postfix Policyd 配置"
+        echo "5. 查看 SMTP 账户信息"
+        echo "q. 返回主菜单"
+        echo "====================="
+        read -p "输入选择: " choice
+        case $choice in
+            1) restart_all_services ;;
+            2) print_status "正在显示 main.cf 配置..." ; cat /etc/postfix/main.cf ; read -p "按 Enter 继续..." ;;
+            3) print_status "正在显示 DKIM 公钥..." ; cat /etc/dkimkeys/$MAIN_DOMAIN/mail.txt ; read -p "按 Enter 继续..." ;;
+            4) print_status "正在显示 Postfix Policyd 配置..." ; cat /etc/postfix/master.cf | grep 'policy-spf' ; read -p "按 Enter 继续..." ;;
+            5) view_smtp_details ;;
+            q|Q) return ;;
+            *) print_error "无效选择。" ; sleep 1 ;;
+        esac
+    done
+}
+
+queue_management_menu() {
+    while true; do
+        clear
+        echo "=== Postfix 队列管理 ==="
+        echo "1. 查看队列"
+        echo "2. 刷新队列"
+        echo "3. 删除所有队列邮件"
+        echo "q. 返回主菜单"
+        echo "======================="
+        read -p "输入选择: " choice
+        case $choice in
+            1) view_queue ;;
+            2) flush_queue ;;
+            3) delete_queue ;;
+            q|Q) return ;;
+            *) print_error "无效选择。" ; sleep 1 ;;
+        esac
+    done
+}
+
+log_management_menu() {
+    while true; do
+        clear
+        echo "=== Postfix 日志管理 ==="
+        echo "1. 查看脚本日志"
+        echo "2. 删除日志"
+        echo "q. 返回主菜单"
+        echo "======================="
+        read -p "输入选择: " choice
+        case $choice in
+            1) view_logs ;;
+            2) delete_logs ;;
+            q|Q) return ;;
+            *) print_error "无效选择。" ; sleep 1 ;;
+        esac
+    done
+}
+
+main
+
