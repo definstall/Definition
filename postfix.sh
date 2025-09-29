@@ -189,7 +189,7 @@ add_dns_records() {
     else
         record_id=$(python3 -c "import json, os; data=json.loads(open(os.environ.get('TEMP_RESPONSE_FILE')).read()); print(data['result'][0]['id'] if data['result'] else '')" TEMP_RESPONSE_FILE="$TEMP_RESPONSE_FILE")
     fi
-    json_data=$(jq -n --arg name "$record_name" --arg ip "$EXTERNAL_IP" '{type: "A", name: $name, content: $ip, ttl: 120, proxied: false}')
+    json_data=$(jq -n --arg name "$DOMAIN" --arg ip "$EXTERNAL_IP" '{type: "A", name: $name, content: $ip, ttl: 120, proxied: false}')
     if [ -n "$record_id" ]; then
         print_status "A 记录已存在，更新记录：$DOMAIN -> $EXTERNAL_IP"
         cloudflare_api PUT "zones/$ZONE_ID/dns_records/$record_id" "$json_data"
