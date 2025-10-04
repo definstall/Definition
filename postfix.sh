@@ -371,9 +371,9 @@ myorigin = \$mydomain
 inet_interfaces = all
 default_process_limit = 10
 default_destination_concurrency_limit = 100
-initial_destination_concurrency = 1
-smtp_destination_concurrency_limit = 1
-smtp_destination_rate_delay = 6s
+initial_destination_concurrency = 10
+smtp_destination_concurrency_limit = 10
+smtp_destination_rate_delay = 1s
 minimal_backoff_time = 300s
 maximal_backoff_time = 4000s
 maximal_queue_lifetime = 1d
@@ -450,10 +450,6 @@ EOF
     print_status "正在配置邮件头优化..."
     cat > /etc/postfix/header_checks <<EOF
 /^Received: from.*/ IGNORE
-/^List-Unsubscribe:/ IGNORE
-/^List-Unsubscribe-Post:/ IGNORE
-/^List-ID:/ IGNORE
-/^Reply-To:/ IGNORE
 /^Feedback-ID:/ IGNORE
 EOF
     postmap /etc/postfix/header_checks
