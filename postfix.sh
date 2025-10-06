@@ -451,7 +451,6 @@ EOF
     print_status "正在配置邮件头优化..."
     cat > /etc/postfix/header_checks <<EOF
 /^Received: from.*/ IGNORE
-/^Feedback-ID:/ IGNORE
 EOF
     postmap /etc/postfix/header_checks
 }
