@@ -12,7 +12,7 @@ declare -A LTS_MAP
 LTS_MAP["focal"]="jammy"   # 20.04 -> 22.04
 LTS_MAP["jammy"]="noble"   # 22.04 -> 24.04
 # 如果未来有新版本，只需在此处添加：
-# LTS_MAP["noble"]="oracular" # 24.04 -> 26.04
+ 
 
 # 设置非交互式模式和 DPKG 选项 (去除所有提示的关键)
 export DEBIAN_FRONTEND=noninteractive
