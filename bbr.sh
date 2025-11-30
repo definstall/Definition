@@ -933,49 +933,40 @@ install_postfix() {
     fi
 
     # 2. 如果指定版本安装失败，则尝试安装系统默认版本
-    if [ "$install_successful" = false ]; then
-        local default_version=$(apt-cache policy postfix | grep 'Candidate' | awk '{print $2}' | tr -d '[:space:]')
-        echo -e "${YELLOW}正在回退：安装系统默认稳定版本 ($default_version)...${NC}"
-        print_status "回退安装系统默认稳定版本 ($default_version)..." true
-
-        # Start fallback installation in background with spinner
-        {
-            # 依赖 DEBIAN_FRONTEND=noninteractive
-            apt-get install -y postfix $packages 2>&1
-        } > "$INSTALL_LOG" &
-        local fallback_pid=$!
-
-        printf "${YELLOW}  正在安装 Postfix 默认版本...${NC}" >&2
-        spinner $fallback_pid
-        wait $fallback_pid
-        local exit_code=$?
-
-        if [ $exit_code -eq 0 ]; then
-            printf "${GREEN}[完成] ${NC}Postfix 默认版本安装成功。\n" >&2
-            install_successful=true
-        else
-            printf "\n" >&2 # 失败时打印新行
-            print_error "回退安装系统默认版本也失败！请检查 $INSTALL_LOG 以获取详细信息。"
-            if [ -f "$INSTALL_LOG" ]; then
-                tail -n 10 "$INSTALL_LOG" >&2
-            fi
-            exit 1
-        fi
-    fi
-
-    if [ "$install_successful" = false ]; then
+if [ "$install_successful" = false ]; then
         print_error "核心邮件服务安装最终失败，请检查系统和仓库配置。"
         exit 1
     fi
     print_status "核心邮件服务安装成功。"
 
-    # 生成 SMTP 账户
-    SMTP_USER="smtp_$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
-    SMTP_PASS="$(openssl rand -base64 12)"
-    mkdir -p "$SCRIPT_DIR/smtp"
-    echo "$SMTP_USER:$SMTP_PASS" > "$SCRIPT_DIR/smtp/credentials"
-    chmod 600 "$SCRIPT_DIR/smtp/credentials"
-    print_status "SMTP 账户已生成，并保存到 $SCRIPT_DIR/smtp/credentials" true
+    # 生成/更新 SMTP 账户：如果变量为空，则生成新的凭证
+    if [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
+        print_status "SMTP 账户凭证未在配置文件中找到，正在生成新凭证..."
+        SMTP_USER="smtp_$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
+        SMTP_PASS="$(openssl rand -base64 12)"
+
+        # 调用 get_user_input 中的保存逻辑来持久化新的凭证
+        # 这里直接调用保存配置逻辑
+        print_status "正在保存新的 SMTP 凭证到 $CONFIG_FILE..."
+        cat > "$CONFIG_FILE" <<EOF
+CLOUDFLARE_EMAIL="$CLOUDFLARE_EMAIL"
+CLOUDFLARE_API_KEY="$CLOUDFLARE_API_KEY"
+DOMAIN="$DOMAIN"
+SMTP_USER="$SMTP_USER"
+SMTP_PASS="$SMTP_PASS"
+EOF
+        chmod 600 "$CONFIG_FILE"
+        print_status "SMTP 账户已生成，并保存到 $CONFIG_FILE" true
+    else
+        print_status "使用配置文件中已有的 SMTP 账户凭证。" true
+    fi
+
+    # 移除旧的 credentials 文件和目录 (清理遗留文件)
+    if [ -f "$SCRIPT_DIR/smtp/credentials" ]; then
+        rm -f "$SCRIPT_DIR/smtp/credentials" || true
+        rmdir "$SCRIPT_DIR/smtp" 2>/dev/null || true
+    fi
+
 
     get_external_ip
     get_zone_id
@@ -1088,14 +1079,6 @@ install_postfix() {
     fi
 }
 
-stop_all_services() {
-    print_status "正在停止所有邮件服务..."
-    service postfix stop || true
-    service opendkim stop || true
-    service saslauthd stop || true
-    print_status "所有服务已停止。"
-}
-
 view_smtp_details() {
     if [ -z "$DOMAIN" ]; then
         print_error "请先运行安装脚本以设置域名和账户信息。"
@@ -1105,18 +1088,21 @@ view_smtp_details() {
     show_header
     echo -e "${GREEN}=== SMTP 账户信息 ===${NC}"
     echo -e "IP 地址: ${GREEN}$EXTERNAL_IP${NC}"
-    echo -e "端口: ${GREEN}25 (SMTP), 465 (SMTPS), 587 (Submission/STARTTLS)${NC}"
-    if [ -f "$SCRIPT_DIR/smtp/credentials" ]; then
-        local user=$(cut -d':' -f1 "$SCRIPT_DIR/smtp/credentials")
-        local pass=$(cut -d':' -f2 "$SCRIPT_DIR/smtp/credentials")
-        echo -e "SMTP 账号: ${GREEN}${user}@${DOMAIN}${NC}"
-        echo -e "SMTP 密码: ${GREEN}$pass${NC}"
+    echo -e "端口: ${GREEN}465 (SMTPS), 587 (STARTTLS)${NC}"
+
+    if [ -n "$SMTP_USER" ] && [ -n "$SMTP_PASS" ]; then
+        # 直接使用全局变量 SMTP_USER 和 SMTP_PASS (从 PostFix_Cloudflare.conf 加载)
+        echo -e "SMTP 邮箱: ${GREEN}no-reply@${DOMAIN}${NC}"
+        echo -e "SMTP 账号: ${GREEN}${SMTP_USER}@${DOMAIN}${NC}"
+        echo -e "SMTP 密码: ${GREEN}$SMTP_PASS${NC}"
     else
-        print_warning "未找到 SMTP 凭证文件，请先安装 Postfix。"
+        print_warning "未找到 SMTP 凭证，请先安装 Postfix 或检查 $CONFIG_FILE。"
     fi
+
     echo -e "${YELLOW}----------------------------------------------------${NC}"
     read -p "按 Enter 继续..."
 }
+
 
 get_user_input() {
     print_status "正在执行初步检测..."
@@ -1154,12 +1140,15 @@ get_user_input() {
         exit 1
     fi
 
-    if $needs_save; then
-        print_status "正在保存新的配置到 $CONFIG_FILE..."
+    if $needs_save || [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
+        # 即使 SMTP 凭证为空，也视为需要保存，但它们将在 install_postfix 中生成
+        print_status "正在保存/更新配置到 $CONFIG_FILE..."
         cat > "$CONFIG_FILE" <<EOF
 CLOUDFLARE_EMAIL="$CLOUDFLARE_EMAIL"
 CLOUDFLARE_API_KEY="$CLOUDFLARE_API_KEY"
 DOMAIN="$DOMAIN"
+SMTP_USER="$SMTP_USER"
+SMTP_PASS="$SMTP_PASS"
 EOF
         chmod 600 "$CONFIG_FILE"
         print_status "配置已保存。" true
