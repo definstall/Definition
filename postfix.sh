@@ -1159,6 +1159,11 @@ EOF
 
     view_smtp_details # 显示 === SMTP 账户信息 ===
 
+    # 显式地尝试清除输入缓冲中的所有字符
+    # -t 0.1 设置超时为 0.1 秒
+    # -n 10000 尝试读取最多 10000 个字符
+    read -t 0.1 -n 10000 || true
+
     print_warning "系统优化配置（如 limits.conf）需要重启 VPS 才能完全生效！"
     read -p "需要重启 VPS 后，才能生效系统优化配置，是否现在重启 ? [Y/n] :" yn
     [ -z "${yn}" ] && yn="y"
