@@ -66,18 +66,31 @@ detect_os() {
             *)
                 OS_FAMILY="other"
                 print_warning "检测到非 Debian/Ubuntu 系统 ($ID)，脚本兼容性可能存在问题。"
+                exit 1
                 ;;
         esac
     else
         # 备用检测方法 (例如使用 lsb_release)
         if command -v lsb_release >/dev/null 2>&1 && lsb_release -is | grep -qi "ubuntu"; then
              OS_FAMILY="ubuntu"
+             #-------------防火墙
+             ufw allow 587/tcp
+             ufw allow 465/tcp
+             ufw allow 22/tcp
+             ufw disable
+             ufw enable
         elif command -v lsb_release >/dev/null 2>&1 && lsb_release -is | grep -qi "debian"; then
-             OS_FAMILY="debian"
+            OS_FAMILY="debian"
+             #-------------防火墙
+            iptables -A INPUT -p tcp --dport 465 -j ACCEPT
+            iptables -A INPUT -p tcp --dport 587 -j ACCEPT
+            iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+            netfilter-persistent reload
         else
              OS_FAMILY="unknown"
-             print_warning "无法检测操作系统类型，默认使用 Debian 兼容模式。"
-             OS_FAMILY="debian" # 默认值
+             print_warning "无法检测操作系统类型，脚本兼容性可能存在问题。"
+             exit 1
+             #OS_FAMILY="debian" # 默认值
         fi
     fi
     print_status "当前操作系统家族：$OS_FAMILY" true
@@ -925,11 +938,15 @@ install_postfix() {
 
     print_status "APT 安装日志将写入 $INSTALL_LOG" true
 
+
     # 1. 查找最高可用的 3.10.* 版本
     print_status "正在查询 Postfix $POSTFIX_TARGET_VERSION.* 系列的稳定版本..."
 
-    # 临时禁用 set -e，防止 grep 失败时脚本退出
+    # 临时禁用 set -e，防止 grep/sort/head 失败时脚本退出
     set +e
+    # 注意：这里的 packages 变量似乎在整个函数中是全局/局部定义的，
+    # 我们需要确保在回退安装时它也包含所有必要的依赖包。
+    # 假设 $packages 包含 'postfix-mysql opendkim opendkim-tools ...' 等依赖包
     version_to_install=$(apt-cache policy postfix | \
         grep -oP "$POSTFIX_TARGET_VERSION\\.[0-9]+\\S*" | \
         sort -rV | \
@@ -937,7 +954,10 @@ install_postfix() {
         tr -d '[:space:]')
     set -e # 重新启用 set -e
 
+    INSTALL_ATTEMPTED=false # 标记是否尝试过安装
+
     if [ -n "$version_to_install" ]; then
+        INSTALL_ATTEMPTED=true
         echo -e "${GREEN}找到稳定版本: Postfix $version_to_install，正在尝试安装...${NC}"
         print_status "尝试安装 Postfix $version_to_install..." true
 
@@ -958,8 +978,8 @@ install_postfix() {
             install_successful=true
         else
             printf "\n" >&2 # 失败时打印新行
-            print_warning "安装 Postfix $version_to_install 失败（退出码 $exit_code），尝试回退到默认版本。"
-            # 在这里打印错误日志的最后几行
+            print_warning "安装 Postfix $version_to_install 失败（退出码 $exit_code）。"
+            # 打印错误日志的最后几行
             print_error "详细错误请查看 $INSTALL_LOG 的最后几行！"
             if [ -f "$INSTALL_LOG" ]; then
                 tail -n 10 "$INSTALL_LOG" >&2
@@ -969,11 +989,46 @@ install_postfix() {
         print_warning "系统仓库中未找到任何 Postfix $POSTFIX_TARGET_VERSION.* 版本。"
     fi
 
-    # 2. 如果指定版本安装失败，则尝试安装系统默认版本
-if [ "$install_successful" = false ]; then
-        print_error "核心邮件服务安装最终失败，请检查系统和仓库配置。"
-        exit 1
+    # 2. 如果指定版本未安装或安装失败 (install_successful=false)，则尝试安装系统默认版本
+    if [ "$install_successful" = false ]; then
+        # 避免在第一次尝试安装成功时再次打印警告
+        if [ "$INSTALL_ATTEMPTED" = true ]; then
+             print_status "现在尝试回退到安装仓库中可用的默认版本..."
+        else
+             # 如果从未尝试安装指定版本 (即 $version_to_install 为空)
+             print_status "直接尝试安装仓库中可用的默认版本..."
+        fi
+
+        # 使用默认的 'postfix' 包名，让 apt 选择仓库中最新的
+        {
+            # 依赖 DEBIAN_FRONTEND=noninteractive
+            apt-get install -y postfix $packages 2>&1
+        } > "$INSTALL_LOG" &
+        local default_install_pid=$!
+
+        printf "${YELLOW}  正在安装 Postfix (默认版本)...${NC}" >&2
+        spinner $default_install_pid
+        wait $default_install_pid
+        local default_exit_code=$?
+
+        if [ $default_exit_code -eq 0 ]; then
+            printf "${GREEN}[完成] ${NC}Postfix (默认版本) 安装成功。\n" >&2
+            install_successful=true
+        else
+            printf "\n" >&2 # 失败时打印新行
+            print_error "安装 Postfix 默认版本失败（退出码 $default_exit_code）。"
+            # 打印错误日志的最后几行
+            print_error "详细错误请查看 $INSTALL_LOG 的最后几行！"
+            if [ -f "$INSTALL_LOG" ]; then
+                tail -n 10 "$INSTALL_LOG" >&2
+            fi
+            # 只有当默认安装也失败时，才最终退出脚本
+            print_error "核心邮件服务安装最终失败，请检查系统和仓库配置。"
+            exit 1
+        fi
     fi
+
+
     print_status "核心邮件服务安装成功。"
 
     # 生成/更新 SMTP 账户：如果变量为空，则生成新的凭证
