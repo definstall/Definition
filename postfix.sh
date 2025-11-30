@@ -32,11 +32,14 @@ MAIN_DOMAIN=""
 SMTP_USER=""
 SMTP_PASS=""
 DKIM_SELECTOR=""
+OS_FAMILY="" # 新增：用于存储检测到的操作系统家族
 CERT_DIR="/etc/postfix/ssl"
 CERT_FILE="$CERT_DIR/smtpd.crt"
 KEY_FILE="$CERT_DIR/smtpd.key"
 POSTFIX_TARGET_VERSION="3.10" # 目标安装版本系列
 POSTFIX_SASLAUTHD_RUN_DIR="/var/spool/postfix/var/run/saslauthd"
+
+
 
 # 初始化日志目录
 init_logs() {
@@ -44,6 +47,40 @@ init_logs() {
     touch "$LOG_FILE" "$INSTALL_LOG"
     : > "$TEMP_RESPONSE_FILE" || true
     chmod 644 "$LOG_FILE" "$INSTALL_LOG"
+}
+
+detect_os() {
+    print_status "正在检测操作系统..."
+
+    # 优先检查 /etc/os-release 文件
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        # $ID 变量在 os-release 中定义 (如 debian 或 ubuntu)
+        case "$ID" in
+            debian)
+                OS_FAMILY="debian"
+                ;;
+            ubuntu)
+                OS_FAMILY="ubuntu"
+                ;;
+            *)
+                OS_FAMILY="other"
+                print_warning "检测到非 Debian/Ubuntu 系统 ($ID)，脚本兼容性可能存在问题。"
+                ;;
+        esac
+    else
+        # 备用检测方法 (例如使用 lsb_release)
+        if command -v lsb_release >/dev/null 2>&1 && lsb_release -is | grep -qi "ubuntu"; then
+             OS_FAMILY="ubuntu"
+        elif command -v lsb_release >/dev/null 2>&1 && lsb_release -is | grep -qi "debian"; then
+             OS_FAMILY="debian"
+        else
+             OS_FAMILY="unknown"
+             print_warning "无法检测操作系统类型，默认使用 Debian 兼容模式。"
+             OS_FAMILY="debian" # 默认值
+        fi
+    fi
+    print_status "当前操作系统家族：$OS_FAMILY" true
 }
 
 # print helpers
@@ -1141,20 +1178,35 @@ get_user_input() {
     fi
 
     if $needs_save || [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
-        # 即使 SMTP 凭证为空，也视为需要保存，但它们将在 install_postfix 中生成
         print_status "正在保存/更新配置到 $CONFIG_FILE..."
-        cat > "$CONFIG_FILE" <<EOF
+
+        # === Linux 版本控制逻辑开始 ===
+        if [ "$OS_FAMILY" = "ubuntu" ]; then
+            # Ubuntu 逻辑：使用明确的 echo 写入，避免潜在的文件描述符解析问题
+            print_status "使用 Ubuntu 兼容方式保存配置（分行写入）。"
+            {
+                echo "CLOUDFLARE_EMAIL=\"$CLOUDFLARE_EMAIL\""
+                echo "CLOUDFLARE_API_KEY=\"$CLOUDFLARE_API_KEY\""
+                echo "DOMAIN=\"$DOMAIN\""
+                echo "SMTP_USER=\"$SMTP_USER\""
+                echo "SMTP_PASS=\"$SMTP_PASS\""
+            } > "$CONFIG_FILE"
+        else
+            # Debian 或通用逻辑：使用标准的 Here Document 写入
+            # 这是一个在大多数发行版上都应该工作的安全写法
+            print_status "使用 Debian/通用方式保存配置（Here Document）。"
+            cat > "$CONFIG_FILE" <<EOF
 CLOUDFLARE_EMAIL="$CLOUDFLARE_EMAIL"
 CLOUDFLARE_API_KEY="$CLOUDFLARE_API_KEY"
 DOMAIN="$DOMAIN"
 SMTP_USER="$SMTP_USER"
 SMTP_PASS="$SMTP_PASS"
 EOF
+        fi
+        # === Linux 版本控制逻辑结束 ===
+
         chmod 600 "$CONFIG_FILE"
         print_status "配置已保存。" true
-    else
-        print_status "所有配置已存在，跳过交互。" true
-    fi
 
     get_external_ip
     get_zone_id
@@ -1388,6 +1440,7 @@ log_management_menu() {
 
 main() {
     init_logs
+    detect_os # <--- 新增
     get_user_input
 
     while true; do
