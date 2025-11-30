@@ -528,7 +528,7 @@ configure_postfix() {
     #含义：首次投递时的并发初始值，Postfix 会动态调整
     postconf -e "smtp_destination_concurrency_limit = 5000"
     #含义：对每个目的地主机并发发起的投递连接数上限。限制对单个远端的发信并发。
-    postconf -e "smtpd_client_connection_limit = 5000"
+    postconf -e "smtpd_client_connection_limit = 500"
     # 含义：单个客户端 IP 可打开的并发 smtpd 连接数上限（防止某个 IP 同时打开大量连接）
 
     # NOTE: 这些 backoff/queue 设置在原脚本为 1s（极短），保留但建议在生产中改为合理值
@@ -579,6 +579,9 @@ configure_postfix() {
     # Recipient restrictions (顺序重要)
     postconf -e "smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination, check_policy_service unix:private/policy-spf"
 
+
+    postconf -e "header_checks = regexp:/etc/postfix/header_checks"
+
     # Milter
     postconf -e "milter_default_action = accept"
     postconf -e "milter_protocol = 2"
@@ -589,6 +592,7 @@ configure_postfix() {
     cat > /etc/postfix/header_checks <<EOF
 /^Received: from.*/ IGNORE
 EOF
+
     # 对于 regexp 不需要 postmap
 
     print_status "正在更新 master.cf（删除旧的 submission/smtps 段后追加标准段）..."
