@@ -1207,6 +1207,7 @@ EOF
 
         chmod 600 "$CONFIG_FILE"
         print_status "配置已保存。" true
+    fi # <--- 修正点：在这里添加 fi，闭合 if $needs_save ... then 语句
 
     get_external_ip
     get_zone_id
