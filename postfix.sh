@@ -598,43 +598,140 @@ pwcheck_method: saslauthd
 mech_list: plain login
 EOF
 
-    # 创建 SMTP 认证账户
+    # 创建 SMTP 认证账户（如未创建则创建）
     print_status "创建 SMTP 认证账户：$SMTP_USER@$DOMAIN ..."
+    # 确保 saslauthd 服务在执行 saslpasswd2 之前停止，以避免文件锁定冲突
+    systemctl stop saslauthd.service 2>/dev/null || service saslauthd stop 2>/dev/null || true
     echo "$SMTP_PASS" | saslpasswd2 -c -u "$DOMAIN" "$SMTP_USER" &>> "$LOG_FILE" || true
 
+    # 如果使用 sasldb 存储，修正 sasldb 文件权限并加入 postfix 到 sasl 组
     if [ -f /etc/sasldb2 ]; then
         chown root:sasl /etc/sasldb2 || true
-        chmod 640 /etc/sasldb2 || true
-        adduser postfix sasl || true
+        chmod 0640 /etc/sasldb2 || true
+        if getent group sasl >/dev/null 2>&1; then
+            if ! id -nG postfix 2>/dev/null | grep -qw sasl; then
+                adduser postfix sasl >/dev/null 2>&1 || true
+            fi
+        fi
     fi
 
+    # 修正 /etc/default/saslauthd，使用宿主机 socket 目录（不使用 chroot 的 PIDFile 覆盖）
     if [ -f "/etc/default/saslauthd" ]; then
-        print_status "配置 /etc/default/saslauthd 以兼容 Postfix chroot 路径..."
+        print_status "配置 /etc/default/saslauthd，使用宿主机 socket 目录 /var/run/saslauthd ..."
+        # 备份一次（幂等）
+        cp /etc/default/saslauthd /etc/default/saslauthd.bak 2>/dev/null || true
+
         sed -i 's/^MECHANISMS=.*/MECHANISMS="sasldb"/' /etc/default/saslauthd || true
         sed -i 's/^START=.*/START=yes/' /etc/default/saslauthd || true
+        # 删除可能存在的 SOCKETDIR/OPTIONS 旧行
         sed -i '/^SOCKETDIR=/d' /etc/default/saslauthd || true
         sed -i '/^OPTIONS=/d' /etc/default/saslauthd || true
-        echo "OPTIONS=\"-c -m $POSTFIX_SASLAUTHD_RUN_DIR\"" >> /etc/default/saslauthd || true
-        echo 'START=yes' >> /etc/default/saslauthd || true
+
+        # 写入 OPTIONS 指向宿主机 /var/run/saslauthd（不使用 -c，以便 systemd 的默认行为正常）
+        if ! grep -q -- 'OPTIONS=".*-m /var/run/saslauthd' /etc/default/saslauthd 2>/dev/null; then
+            echo 'OPTIONS="-m /var/run/saslauthd -n 5"' >> /etc/default/saslauthd || true
+        fi
+        if ! grep -q '^START=' /etc/default/saslauthd 2>/dev/null; then
+            echo 'START=yes' >> /etc/default/saslauthd || true
+        fi
     else
-        print_warning "/etc/default/saslauthd 文件不存在，请手动检查 saslauthd 配置。"
+        print_warning "/etc/default/saslauthd 文件不存在，创建一个默认配置..."
+        cat >/etc/default/saslauthd <<EOF
+START=yes
+MECHANISMS="sasldb"
+OPTIONS="-m /var/run/saslauthd -n 5"
+EOF
     fi
 
-    # 创建 chroot 运行目录并设置权限
-    print_status "创建 SASL chroot socket 目录并设置权限：$POSTFIX_SASLAUTHD_RUN_DIR"
-    mkdir -p "$POSTFIX_SASLAUTHD_RUN_DIR"
-    chown root:sasl "$POSTFIX_SASLAUTHD_RUN_DIR" || true
-    chmod 710 "$POSTFIX_SASLAUTHD_RUN_DIR" || true
+    # 确保宿主机 socket 目录存在并权限正确
+    print_status "确保宿主机 saslauthd socket 目录 /var/run/saslauthd 存在并设置权限..."
+    mkdir -p /var/run/saslauthd
+    chown root:sasl /var/run/saslauthd 2>/dev/null || true
+    chmod 0755 /var/run/saslauthd 2>/dev/null || true
 
-    # systemd override
-    print_status "配置 systemd override 以匹配 chroot PID 路径..."
-    mkdir -p /etc/systemd/system/saslauthd.service.d
-    cat > /etc/systemd/system/saslauthd.service.d/override.conf << EOF
+    # 创建 Postfix chroot 下的目录（将通过 bind-mount 挂载宿主机 socket）
+    print_status "创建 Postfix chroot 下的 socket 目录：$POSTFIX_SASLAUTHD_RUN_DIR"
+    mkdir -p "$POSTFIX_SASLAUTHD_RUN_DIR"
+    chown root:root "$POSTFIX_SASLAUTHD_RUN_DIR" 2>/dev/null || true
+    chmod 0755 "$POSTFIX_SASLAUTHD_RUN_DIR" 2>/dev/null || true
+
+    # 将 /var/run/saslauthd bind-mount 到 /var/spool/postfix/var/run/saslauthd，持久化到 /etc/fstab（如果尚未配置）
+    FSTAB_LINE="/var/run/saslauthd $POSTFIX_SASLAUTHD_RUN_DIR none bind 0 0"
+    if ! grep -Fq "$FSTAB_LINE" /etc/fstab 2>/dev/null; then
+        print_status "向 /etc/fstab 添加 bind 挂载条目（保证重启后 chroot 可见）..."
+        echo "$FSTAB_LINE" >> /etc/fstab || true
+    fi
+    # 立即生效（幂等）
+    if ! mountpoint -q "$POSTFIX_SASLAUTHD_RUN_DIR"; then
+        mount --bind /var/run/saslauthd "$POSTFIX_SASLAUTHD_RUN_DIR" 2>/dev/null || true
+    fi
+
+    # 删除之前可能写入的错误 override（PIDFile 指向 chroot 会导致 systemd 挂起）
+    if [ -f /etc/systemd/system/saslauthd.service.d/override.conf ]; then
+        # 备份后删除
+        cp /etc/systemd/system/saslauthd.service.d/override.conf /root/override.saslauthd.conf.bak 2>/dev/null || true
+        rm -f /etc/systemd/system/saslauthd.service.d/override.conf || true
+    fi
+
+    # -------------------------------------------------------------------------
+    # 修复点：为 saslauthd 创建 Systemd drop-in，确保启动顺序和 PID 文件正确
+    # -------------------------------------------------------------------------
+    print_status "为 saslauthd 创建 Systemd drop-in 配置文件..."
+    mkdir -p /etc/systemd/system/saslauthd.service.d >/dev/null 2>&1 || true
+
+    # 使用 local_override.conf 避免与默认 override.conf 冲突，并强化依赖
+    cat >/etc/systemd/system/saslauthd.service.d/local_override.conf <<'EOF'
+[Unit]
+# 确保在网络目标和本地文件系统准备好后启动（包括 /etc/fstab 挂载）
+Wants=network-online.target local-fs.target
+After=network-online.target local-fs.target
+
 [Service]
-PIDFile=$POSTFIX_SASLAUTHD_RUN_DIR/saslauthd.pid
+# 使用 /var/run/saslauthd/saslauthd.pid 作为 PID 文件
+PIDFile=/var/run/saslauthd/saslauthd.pid
+Type=forking
+# 启动前确保 socket 目录存在且权限正确
+ExecStartPre=-/bin/mkdir -p /var/run/saslauthd
+ExecStartPre=-/bin/chown root:sasl /var/run/saslauthd
+ExecStartPre=-/bin/chmod 0755 /var/run/saslauthd
+# 确保在 /etc/default/saslauthd 中配置了 OPTIONS="-m /var/run/saslauthd..."
 EOF
+    # -------------------------------------------------------------------------
+
+    # 重新加载 systemd（确保移除错误 override 并加载新的 local_override）
     systemctl daemon-reload || true
-    print_status "systemd override 配置完成。"
+    print_status "systemd 重载已完成，saslauthd 依赖已强化。"
+
+    # 启用并启动 saslauthd（幂等）
+    print_status "启用并启动 saslauthd 服务..."
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable saslauthd.service >/dev/null 2>&1 || true
+        systemctl restart saslauthd.service >/dev/null 2>&1 || systemctl start saslauthd.service >/dev/null 2>&1 || true
+    else
+        update-rc.d saslauthd defaults >/dev/null 2>&1 || true
+        service saslauthd restart >/dev/null 2>&1 || service saslauthd start >/dev/null 2>&1 || true
+    fi
+
+    # 确保 postfix 用户可以访问 socket（group membership）
+    if getent group sasl >/dev/null 2>&1; then
+        if ! id -nG postfix 2>/dev/null | grep -qw sasl; then
+            adduser postfix sasl >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # 创建 postfix 的 systemd drop-in，确保 postfix 在 saslauthd 启动后再启动（幂等）
+    mkdir -p /etc/systemd/system/postfix.service.d >/dev/null 2>&1 || true
+    cat >/etc/systemd/system/postfix.service.d/override.conf <<'EOF'
+[Unit]
+Wants=saslauthd.service
+After=saslauthd.service
+EOF
+
+    # 重新加载 systemd 并启用 & 重启 postfix 以使依赖生效
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable postfix.service >/dev/null 2>&1 || true
+    # 这里只做 enable 和 daemon-reload，实际重启在 install_postfix 结尾的 restart_all_services 中完成
+    # systemctl restart postfix.service >/dev/null 2>&1 || service postfix restart >/dev/null 2>&1 || true
 
     print_status "检查 Postfix 虚拟别名映射文件..."
     if [ ! -f /etc/postfix/virtual ]; then
@@ -717,6 +814,41 @@ EOF
 optimizing_system(){
     print_status "正在配置系统参数以进行网络和文件句柄优化..."
     # (略) 保留原脚本的 sysctl/limits 修改逻辑（如需可启用）
+	sed -i '/fs.file-max/d' /etc/sysctl.conf
+	sed -i '/fs.inotify.max_user_instances/d' /etc/sysctl.conf
+	sed -i '/net.ipv4.tcp_tw_reuse/d' /etc/sysctl.conf
+	sed -i '/net.ipv4.ip_local_port_range/d' /etc/sysctl.conf
+	sed -i '/net.ipv4.tcp_rmem/d' /etc/sysctl.conf
+	sed -i '/net.ipv4.tcp_wmem/d' /etc/sysctl.conf
+	sed -i '/net.core.somaxconn/d' /etc/sysctl.conf
+	sed -i '/net.core.rmem_max/d' /etc/sysctl.conf
+	sed -i '/net.core.wmem_max/d' /etc/sysctl.conf
+	sed -i '/net.core.wmem_default/d' /etc/sysctl.conf
+	sed -i '/net.ipv4.tcp_max_tw_buckets/d' /etc/sysctl.conf
+	sed -i '/net.ipv4.tcp_max_syn_backlog/d' /etc/sysctl.conf
+	sed -i '/net.core.netdev_max_backlog/d' /etc/sysctl.conf
+ 	sed -i '/net.ipv4.tcp_slow_start_after_idle/d' /etc/sysctl.conf
+	sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
+	echo "fs.file-max = 1000000
+fs.inotify.max_user_instances = 8192
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_rmem = 16384 262144 8388608
+net.ipv4.tcp_wmem = 32768 524288 16777216
+net.core.somaxconn = 8192
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.wmem_default = 2097152
+net.ipv4.tcp_max_tw_buckets = 5000
+net.ipv4.tcp_max_syn_backlog = 10240
+net.core.netdev_max_backlog = 10240
+net.ipv4.tcp_slow_start_after_idle = 0
+# forward ipv4
+net.ipv4.ip_forward = 1">>/etc/sysctl.conf
+	sysctl -p
+	echo "*               soft    nofile           1000000
+*               hard    nofile          1000000">/etc/security/limits.conf
+	echo "ulimit -SHn 1000000">>/etc/profile
     print_status "系统优化函数已加载，如需启用请在脚本中调用。"
 }
 
@@ -801,49 +933,40 @@ install_postfix() {
     fi
 
     # 2. 如果指定版本安装失败，则尝试安装系统默认版本
-    if [ "$install_successful" = false ]; then
-        local default_version=$(apt-cache policy postfix | grep 'Candidate' | awk '{print $2}' | tr -d '[:space:]')
-        echo -e "${YELLOW}正在回退：安装系统默认稳定版本 ($default_version)...${NC}"
-        print_status "回退安装系统默认稳定版本 ($default_version)..." true
-
-        # Start fallback installation in background with spinner
-        {
-            # 依赖 DEBIAN_FRONTEND=noninteractive
-            apt-get install -y postfix $packages 2>&1
-        } > "$INSTALL_LOG" &
-        local fallback_pid=$!
-
-        printf "${YELLOW}  正在安装 Postfix 默认版本...${NC}" >&2
-        spinner $fallback_pid
-        wait $fallback_pid
-        local exit_code=$?
-
-        if [ $exit_code -eq 0 ]; then
-            printf "${GREEN}[完成] ${NC}Postfix 默认版本安装成功。\n" >&2
-            install_successful=true
-        else
-            printf "\n" >&2 # 失败时打印新行
-            print_error "回退安装系统默认版本也失败！请检查 $INSTALL_LOG 以获取详细信息。"
-            if [ -f "$INSTALL_LOG" ]; then
-                tail -n 10 "$INSTALL_LOG" >&2
-            fi
-            exit 1
-        fi
-    fi
-
-    if [ "$install_successful" = false ]; then
+if [ "$install_successful" = false ]; then
         print_error "核心邮件服务安装最终失败，请检查系统和仓库配置。"
         exit 1
     fi
     print_status "核心邮件服务安装成功。"
 
-    # 生成 SMTP 账户
-    SMTP_USER="smtp_$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
-    SMTP_PASS="$(openssl rand -base64 12)"
-    mkdir -p "$SCRIPT_DIR/smtp"
-    echo "$SMTP_USER:$SMTP_PASS" > "$SCRIPT_DIR/smtp/credentials"
-    chmod 600 "$SCRIPT_DIR/smtp/credentials"
-    print_status "SMTP 账户已生成，并保存到 $SCRIPT_DIR/smtp/credentials" true
+    # 生成/更新 SMTP 账户：如果变量为空，则生成新的凭证
+    if [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
+        print_status "SMTP 账户凭证未在配置文件中找到，正在生成新凭证..."
+        SMTP_USER="smtp_$(head /dev/urandom | tr -dc a-z0-9 | head -c 6)"
+        SMTP_PASS="$(openssl rand -base64 12)"
+
+        # 调用 get_user_input 中的保存逻辑来持久化新的凭证
+        # 这里直接调用保存配置逻辑
+        print_status "正在保存新的 SMTP 凭证到 $CONFIG_FILE..."
+        cat > "$CONFIG_FILE" <<EOF
+CLOUDFLARE_EMAIL="$CLOUDFLARE_EMAIL"
+CLOUDFLARE_API_KEY="$CLOUDFLARE_API_KEY"
+DOMAIN="$DOMAIN"
+SMTP_USER="$SMTP_USER"
+SMTP_PASS="$SMTP_PASS"
+EOF
+        chmod 600 "$CONFIG_FILE"
+        print_status "SMTP 账户已生成，并保存到 $CONFIG_FILE" true
+    else
+        print_status "使用配置文件中已有的 SMTP 账户凭证。" true
+    fi
+
+    # 移除旧的 credentials 文件和目录 (清理遗留文件)
+    if [ -f "$SCRIPT_DIR/smtp/credentials" ]; then
+        rm -f "$SCRIPT_DIR/smtp/credentials" || true
+        rmdir "$SCRIPT_DIR/smtp" 2>/dev/null || true
+    fi
+
 
     get_external_ip
     get_zone_id
@@ -942,6 +1065,8 @@ install_postfix() {
 
     optimizing_system
 
+    view_smtp_details # 显示 === SMTP 账户信息 ===
+
     print_warning "系统优化配置（如 limits.conf）需要重启 VPS 才能完全生效！"
     read -p "需要重启 VPS 后，才能生效系统优化配置，是否现在重启 ? [Y/n] :" yn
     [ -z "${yn}" ] && yn="y"
@@ -954,14 +1079,6 @@ install_postfix() {
     fi
 }
 
-stop_all_services() {
-    print_status "正在停止所有邮件服务..."
-    service postfix stop || true
-    service opendkim stop || true
-    service saslauthd stop || true
-    print_status "所有服务已停止。"
-}
-
 view_smtp_details() {
     if [ -z "$DOMAIN" ]; then
         print_error "请先运行安装脚本以设置域名和账户信息。"
@@ -971,18 +1088,21 @@ view_smtp_details() {
     show_header
     echo -e "${GREEN}=== SMTP 账户信息 ===${NC}"
     echo -e "IP 地址: ${GREEN}$EXTERNAL_IP${NC}"
-    echo -e "端口: ${GREEN}25 (SMTP), 465 (SMTPS), 587 (Submission/STARTTLS)${NC}"
-    if [ -f "$SCRIPT_DIR/smtp/credentials" ]; then
-        local user=$(cut -d':' -f1 "$SCRIPT_DIR/smtp/credentials")
-        local pass=$(cut -d':' -f2 "$SCRIPT_DIR/smtp/credentials")
-        echo -e "SMTP 账号: ${GREEN}${user}@${DOMAIN}${NC}"
-        echo -e "SMTP 密码: ${GREEN}$pass${NC}"
+    echo -e "端口: ${GREEN}465 (SMTPS), 587 (STARTTLS)${NC}"
+
+    if [ -n "$SMTP_USER" ] && [ -n "$SMTP_PASS" ]; then
+        # 直接使用全局变量 SMTP_USER 和 SMTP_PASS (从 PostFix_Cloudflare.conf 加载)
+        echo -e "SMTP 邮箱: ${GREEN}no-reply@${DOMAIN}${NC}"
+        echo -e "SMTP 账号: ${GREEN}${SMTP_USER}@${DOMAIN}${NC}"
+        echo -e "SMTP 密码: ${GREEN}$SMTP_PASS${NC}"
     else
-        print_warning "未找到 SMTP 凭证文件，请先安装 Postfix。"
+        print_warning "未找到 SMTP 凭证，请先安装 Postfix 或检查 $CONFIG_FILE。"
     fi
+
     echo -e "${YELLOW}----------------------------------------------------${NC}"
     read -p "按 Enter 继续..."
 }
+
 
 get_user_input() {
     print_status "正在执行初步检测..."
@@ -1020,12 +1140,15 @@ get_user_input() {
         exit 1
     fi
 
-    if $needs_save; then
-        print_status "正在保存新的配置到 $CONFIG_FILE..."
+    if $needs_save || [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
+        # 即使 SMTP 凭证为空，也视为需要保存，但它们将在 install_postfix 中生成
+        print_status "正在保存/更新配置到 $CONFIG_FILE..."
         cat > "$CONFIG_FILE" <<EOF
 CLOUDFLARE_EMAIL="$CLOUDFLARE_EMAIL"
 CLOUDFLARE_API_KEY="$CLOUDFLARE_API_KEY"
 DOMAIN="$DOMAIN"
+SMTP_USER="$SMTP_USER"
+SMTP_PASS="$SMTP_PASS"
 EOF
         chmod 600 "$CONFIG_FILE"
         print_status "配置已保存。" true
