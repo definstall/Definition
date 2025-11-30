@@ -1240,35 +1240,24 @@ get_user_input() {
     if $needs_save || [ -z "$SMTP_USER" ] || [ -z "$SMTP_PASS" ]; then
         print_status "正在保存/更新配置到 $CONFIG_FILE..."
 
-        # === Linux 版本控制逻辑开始 ===
-        if [ "$OS_FAMILY" = "ubuntu" ]; then
-            # Ubuntu 逻辑：使用明确的 echo 写入，避免潜在的文件描述符解析问题
-            print_status "使用 Ubuntu 兼容方式保存配置（分行写入）。"
-            {
-                echo "CLOUDFLARE_EMAIL=\"$CLOUDFLARE_EMAIL\""
-                echo "CLOUDFLARE_API_KEY=\"$CLOUDFLARE_API_KEY\""
-                echo "DOMAIN=\"$DOMAIN\""
-                echo "SMTP_USER=\"$SMTP_USER\""
-                echo "SMTP_PASS=\"$SMTP_PASS\""
-            } > "$CONFIG_FILE"
-        else
-            # Debian 或通用逻辑：使用标准的 Here Document 写入
-            # 这是一个在大多数发行版上都应该工作的安全写法
-            print_status "使用 Debian/通用方式保存配置（Here Document）。"
-            #cat > "$CONFIG_FILE" <<EOF
-            cat > "$CONFIG_FILE" <<EOF
-CLOUDFLARE_EMAIL="$CLOUDFLARE_EMAIL"
-CLOUDFLARE_API_KEY="$CLOUDFLARE_API_KEY"
-DOMAIN="$DOMAIN"
-SMTP_USER="$SMTP_USER"
-SMTP_PASS="$SMTP_PASS"
-EOF
-        fi
-        # === Linux 版本控制逻辑结束 ===
+        # === 统一的兼容方式：使用 Command Group 重定向写入 (最安全) ===
+        # 这种方式在 Debian 和 Ubuntu 环境中都更稳定，避免了 Here Document
+        # 引起的 /dev/fd/ 问题。
+        print_status "使用最兼容的方式保存配置（分行写入）。"
+
+        {
+            # 注意：配置值使用双引号，以确保 source 时包含空格的密码等值能正确解析。
+            echo "CLOUDFLARE_EMAIL=\"$CLOUDFLARE_EMAIL\""
+            echo "CLOUDFLARE_API_KEY=\"$CLOUDFLARE_API_KEY\""
+            echo "DOMAIN=\"$DOMAIN\""
+            echo "SMTP_USER=\"$SMTP_USER\""
+            echo "SMTP_PASS=\"$SMTP_PASS\""
+        } > "$CONFIG_FILE"
+        # === 统一的兼容方式结束 ===
 
         chmod 600 "$CONFIG_FILE"
         print_status "配置已保存。" true
-    fi # <--- 修正点：在这里添加 fi，闭合 if $needs_save ... then 语句
+    fi
 
     get_external_ip
     get_zone_id
