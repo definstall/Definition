@@ -63,50 +63,84 @@ init_logs() {
     chmod 644 "$LOG_FILE" "$INSTALL_LOG"
 }
 
+configure_firewall() {
+    print_status "正在配置防火墙规则..."
+
+    if [ "$OS_FAMILY" = "ubuntu" ]; then
+        # Ubuntu 使用 UFW
+        print_status "正在使用 UFW 配置 Ubuntu 防火墙..."
+        ufw allow 587/tcp >> "$LOG_FILE" 2>&1
+        ufw allow 465/tcp >> "$LOG_FILE" 2>&1
+        ufw allow 22/tcp >> "$LOG_FILE" 2>&1
+
+        # 禁用并重新启用以确保规则生效
+        # 只有在 ufw 已经启用时才执行 disable/enable
+        if ufw status | grep -q "active"; then
+            ufw disable >> "$LOG_FILE" 2>&1
+        fi
+        ufw enable -y >> "$LOG_FILE" 2>&1
+        print_status "UFW 规则已应用：允许 22, 465, 587 端口。" true
+
+    elif [ "$OS_FAMILY" = "debian" ]; then
+        # Debian/通用使用 IPTABLES 持久化规则
+        print_status "正在使用 IPTABLES 配置 Debian/通用防火墙..."
+        # 确保 netfilter-persistent 已安装
+        if ! command -v netfilter-persistent >/dev/null 2>&1; then
+            print_warning "未找到 netfilter-persistent，尝试安装..."
+            apt install -y netfilter-persistent >> "$INSTALL_LOG" 2>&1
+        fi
+
+        iptables -A INPUT -p tcp --dport 465 -j ACCEPT >> "$LOG_FILE" 2>&1
+        iptables -A INPUT -p tcp --dport 587 -j ACCEPT >> "$LOG_FILE" 2>&1
+        iptables -A INPUT -p tcp --dport 22 -j ACCEPT >> "$LOG_FILE" 2>&1
+
+        # 保存并重新加载规则，使其持久化
+        netfilter-persistent save >> "$LOG_FILE" 2>&1
+        netfilter-persistent reload >> "$LOG_FILE" 2>&1
+        print_status "IPTABLES 规则已应用并持久化：允许 22, 465, 587 端口。" true
+
+    else
+        print_warning "当前操作系统 ($OS_FAMILY) 防火墙配置已跳过。"
+    fi
+}
+
 detect_os() {
     print_status "正在检测操作系统..."
 
-    # 优先检查 /etc/os-release 文件
+    # 优先检查 /etc/os-release 文件 (这是现代 Linux 的标准)
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        # $ID 变量在 os-release 中定义 (如 debian 或 ubuntu)
+
         case "$ID" in
-            debian)
-                OS_FAMILY="debian"
-                ;;
-            ubuntu)
-                OS_FAMILY="ubuntu"
+            debian|ubuntu)
+                OS_FAMILY="$ID"
                 ;;
             *)
                 OS_FAMILY="other"
-                print_warning "检测到非 Debian/Ubuntu 系统 ($ID)，脚本兼容性可能存在问题。"
+                print_error "检测到非 Debian/Ubuntu 系统 ($ID)，脚本兼容性存在问题，请退出。"
                 exit 1
                 ;;
         esac
-    else
-        # 备用检测方法 (例如使用 lsb_release)
-        if command -v lsb_release >/dev/null 2>&1 && lsb_release -is | grep -qi "ubuntu"; then
+    # 备用检测方法 (仅在 /etc/os-release 不存在时执行，例如某些旧系统)
+    elif command -v lsb_release >/dev/null 2>&1; then
+        local lsb_info
+        lsb_info=$(lsb_release -is | tr '[:upper:]' '[:lower:]')
+        if [[ "$lsb_info" == *ubuntu* ]]; then
              OS_FAMILY="ubuntu"
-             #-------------防火墙
-             ufw allow 587/tcp
-             ufw allow 465/tcp
-             ufw allow 22/tcp
-             ufw disable
-             ufw enable
-        elif command -v lsb_release >/dev/null 2>&1 && lsb_release -is | grep -qi "debian"; then
+        elif [[ "$lsb_info" == *debian* ]]; then
             OS_FAMILY="debian"
-             #-------------防火墙
-            iptables -A INPUT -p tcp --dport 465 -j ACCEPT
-            iptables -A INPUT -p tcp --dport 587 -j ACCEPT
-            iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-            netfilter-persistent reload
         else
              OS_FAMILY="unknown"
-             print_warning "无法检测操作系统类型，脚本兼容性可能存在问题。"
-             exit 1
-             #OS_FAMILY="debian" # 默认值
         fi
+    else
+         OS_FAMILY="unknown"
     fi
+
+    if [ "$OS_FAMILY" = "unknown" ] || [ "$OS_FAMILY" = "other" ]; then
+        print_error "无法识别操作系统类型或类型不受支持。请在 Debian 或 Ubuntu 上运行本脚本。"
+        exit 1
+    fi
+
     print_status "当前操作系统家族：$OS_FAMILY" true
 }
 
@@ -1509,7 +1543,10 @@ log_management_menu() {
 
 main() {
     init_logs
+
     detect_os # <--- 新增
+    configure_firewall # <--- 新增在这里调用防火墙配置
+
     get_user_input
 
     while true; do
