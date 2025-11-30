@@ -470,14 +470,20 @@ configure_postfix() {
     postconf -e "inet_protocols = all"
 
     # NOTE: 队列快速膨胀，消耗磁盘空间（/var/spool/postfix）；若磁盘满，会导致邮件无法写入或服务异常。
-    postconf -e "default_process_limit = 500"  #含义：Postfix 允许的最大子进程总数（整体并发上限）。
-    postconf -e "default_destination_concurrency_limit = 500" #含义：对默认目的地允许的并发投递连接数上限（每个目的主机/域）。
-    postconf -e "initial_destination_concurrency = 30" #含义：首次投递时的并发初始值，Postfix 会动态调整
-    postconf -e "smtp_destination_concurrency_limit = 5000" #含义：对每个目的地主机并发发起的投递连接数上限。限制对单个远端的发信并发。
-    postconf -e "smtpd_client_connection_limit = 5000" # 含义：单个客户端 IP 可打开的并发 smtpd 连接数上限（防止某个 IP 同时打开大量连接）
+    postconf -e "default_process_limit = 500"
+    #含义：Postfix 允许的最大子进程总数（整体并发上限）。
+    postconf -e "default_destination_concurrency_limit = 500"
+    #含义：对默认目的地允许的并发投递连接数上限（每个目的主机/域）。
+    postconf -e "initial_destination_concurrency = 30"
+    #含义：首次投递时的并发初始值，Postfix 会动态调整
+    postconf -e "smtp_destination_concurrency_limit = 5000"
+    #含义：对每个目的地主机并发发起的投递连接数上限。限制对单个远端的发信并发。
+    postconf -e "smtpd_client_connection_limit = 5000"
+    # 含义：单个客户端 IP 可打开的并发 smtpd 连接数上限（防止某个 IP 同时打开大量连接）
 
     # NOTE: 这些 backoff/queue 设置在原脚本为 1s（极短），保留但建议在生产中改为合理值
-    postconf -e "smtp_destination_rate_delay = 1s" #含义：向同一目的地主机连续发送邮件时每连接之间的最小延迟（用于限速）。`1s` 表示每连接间隔 1 秒。
+    postconf -e "smtp_destination_rate_delay = 1s"
+    #含义：向同一目的地主机连续发送邮件时每连接之间的最小延迟（用于限速）。`1s` 表示每连接间隔 1 秒。
     postconf -e "minimal_backoff_time = 30s"
     postconf -e "maximal_backoff_time = 60s"
     postconf -e "maximal_queue_lifetime = 1000s"
@@ -487,13 +493,18 @@ configure_postfix() {
     postconf -e "local_recipient_maps = unix:passwd.byname \$virtual_alias_maps"
     postconf -e "virtual_alias_domains = $DOMAIN"
     postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual"
-    postconf -e "relay_domains ="  #  - 含义：Postfix 接受并转发（中继）的域列表。为空表示不对外中继，这是常见且安全的设置（避免开放中继）。
-    postconf -e "relayhost =" #  - 含义：如果设置，为所有外发邮件指定上游 smarthost（例如 ISP 或外部 SMTP 中继）。空表示直接按目标 MX 投递。
+    postconf -e "relay_domains ="
+    #  - 含义：Postfix 接受并转发（中继）的域列表。为空表示不对外中继，这是常见且安全的设置（避免开放中继）。
+    postconf -e "relayhost ="
+    #  - 含义：如果设置，为所有外发邮件指定上游 smarthost（例如 ISP 或外部 SMTP 中继）。空表示直接按目标 MX 投递。
     postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128 $EXTERNAL_IP/32"
-    postconf -e "mailbox_size_limit = 5000000"  # 限制的是“邮箱总容量”，当本地投递发现超过该值会拒绝/产生 552 这里50MB
-    postconf -e "message_size_limit = 2048576"  # 限制单封大小 2MB
+    postconf -e "mailbox_size_limit = 5000000"
+    # 限制的是“邮箱总容量”，当本地投递发现超过该值会拒绝/产生 552 这里50MB
+    postconf -e "message_size_limit = 2048576"
+    # 限制单封大小 2MB
     postconf -e "recipient_delimiter = +"
-    postconf -e "home_mailbox = EmailBox/"  #原先的  Maildir
+    postconf -e "home_mailbox = EmailBox"
+    #原先的  Maildir
 
     # TLS 相关
     postconf -e "smtpd_use_tls = yes"
