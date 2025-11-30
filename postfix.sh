@@ -16,12 +16,26 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # 核心变量定义
+# 原始 SCRIPT_DIR 计算 (在本地执行时有效)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# === 远程执行兼容性修复：强制路径重置 (Process Substitution Fix) ===
+# 检查脚本是否通过文件描述符 (process substitution) 执行
+# ${BASH_SOURCE[0]} 在 bash <(curl ...) 下是 /dev/fd/63 类似路径
+if [[ "${BASH_SOURCE[0]}" == "/dev/fd/"* ]] || [[ "$SCRIPT_DIR" == "/dev/"* ]]; then
+    # 当通过 bash <(curl ...) 执行时，脚本文件路径是临时的，
+    # 此时将配置文件的父目录默认设置为 /root
+    SCRIPT_DIR="/root"
+fi
+
 LOG_DIR="/root/Postfix_logs"
 TEMP_RESPONSE_FILE="$LOG_DIR/cloudflare_api_response.txt"
 LOG_FILE="$LOG_DIR/Postfix_install.log"
 INSTALL_LOG="$LOG_DIR/apt_install_temp.log"
+
+# 重新定义 CONFIG_FILE，使用修正后的 SCRIPT_DIR
 CONFIG_FILE="$SCRIPT_DIR/PostFix_Cloudflare.conf"
+
 USE_JQ=true
 CLOUDFLARE_EMAIL=""
 CLOUDFLARE_API_KEY=""
@@ -1515,5 +1529,4 @@ main() {
 
 # 启动主菜单
 main
-
 
