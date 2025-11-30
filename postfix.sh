@@ -69,7 +69,7 @@ configure_firewall() {
     if [ "$OS_FAMILY" = "ubuntu" ]; then
         # Ubuntu 使用 UFW
         print_status "正在使用 UFW 配置 Ubuntu 防火墙..."
-        
+
         # 确保 UFW 包已安装
         if ! command -v ufw >/dev/null 2>&1; then
             print_warning "未找到 UFW，尝试安装..."
@@ -80,21 +80,21 @@ configure_firewall() {
         ufw allow 587/tcp >> "$LOG_FILE" 2>&1
         ufw allow 465/tcp >> "$LOG_FILE" 2>&1
         ufw allow 22/tcp >> "$LOG_FILE" 2>&1
-        
+
         # 关键修正：使用 ECHO 'y' 强制通过 UFW 的交互式确认
         # ufw enable 命令可能会中断 SSH 连接并询问是否继续 (y|n)?
         echo "y" | ufw enable >> "$LOG_FILE" 2>&1
-        
+
         if [ $? -eq 0 ]; then
             print_status "UFW 规则已应用并启用：允许 22, 465, 587 端口。" true
         else
             print_warning "UFW 启用可能失败或需要手动确认，请检查日志。"
         fi
-        
+
     elif [ "$OS_FAMILY" = "debian" ]; then
         # Debian/通用使用 IPTABLES 持久化规则
         print_status "正在使用 IPTABLES 配置 Debian/通用防火墙..."
-        
+
         # 确保 netfilter-persistent 已安装
         if ! command -v netfilter-persistent >/dev/null 2>&1; then
             print_warning "未找到 netfilter-persistent，尝试安装..."
@@ -106,7 +106,7 @@ configure_firewall() {
         iptables -A INPUT -p tcp --dport 465 -j ACCEPT >> "$LOG_FILE" 2>&1
         iptables -A INPUT -p tcp --dport 587 -j ACCEPT >> "$LOG_FILE" 2>&1
         iptables -A INPUT -p tcp --dport 22 -j ACCEPT >> "$LOG_FILE" 2>&1
-        
+
         # 保存并重新加载规则，使其持久化
         # 在非交互模式下，使用 service 或 systemctl 可能会更稳定，但我们坚持使用 netfilter-persistent
         netfilter-persistent save >> "$LOG_FILE" 2>&1
@@ -117,12 +117,11 @@ configure_firewall() {
         else
             print_warning "IPTABLES 规则保存/重载失败，请检查日志。"
         fi
-        
+
     else
         print_warning "当前操作系统 ($OS_FAMILY) 防火墙配置已跳过。"
     fi
 }
-
 
 detect_os() {
     print_status "正在检测操作系统..."
@@ -1228,6 +1227,14 @@ EOF
     print_status "请验证 Cloudflare DNS 记录是否已生效。"
 
     optimizing_system
+
+
+     # "正在重启 OpenDKIM、saslauthd 和 Postfix 服务..."
+    set +e
+    systemctl restart opendkim.service 2>/dev/null || service opendkim restart 2>/dev/null || true
+    systemctl restart saslauthd.service 2>/dev/null || service saslauthd restart 2>/dev/null || true
+    systemctl restart postfix.service 2>/dev/null || service postfix restart 2>/dev/null || true
+    set -e
 
     view_smtp_details # 显示 === SMTP 账户信息 ===
 
