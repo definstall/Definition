@@ -1256,7 +1256,7 @@ get_user_input() {
             # 这是一个在大多数发行版上都应该工作的安全写法
             print_status "使用 Debian/通用方式保存配置（Here Document）。"
             #cat > "$CONFIG_FILE" <<EOF
-            cat > $CONFIG_FILE <<EOF
+            cat > "$CONFIG_FILE" <<EOF
 CLOUDFLARE_EMAIL="$CLOUDFLARE_EMAIL"
 CLOUDFLARE_API_KEY="$CLOUDFLARE_API_KEY"
 DOMAIN="$DOMAIN"
