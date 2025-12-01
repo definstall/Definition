@@ -212,8 +212,10 @@ check_json_parser() {
         print_status "检测到 jq，将优先使用 jq 解析 JSON。" true
         USE_JQ=true
     elif command -v python3 >/dev/null 2>&1; then
-        print_warning "未检测到 jq，将使用 Python 解析 JSON。"
-        USE_JQ=false
+        print_warning "未检测到 jq，将安装jp 解析 JSON。"  #"未检测到 jq，将使用 Python 解析 JSON。"
+        sudo apt update > /dev/null 2>&1 && sudo apt install -y jq > /dev/null 2>&1
+       # sudo apt update && sudo apt install -y jq
+        USE_JQ=true
     else
         print_status "未找到 jq，正在尝试安装..." true
         apt-get update -y &> /dev/null || true
@@ -222,8 +224,10 @@ check_json_parser() {
             print_status "jq 已成功安装。" true
             USE_JQ=true
         elif command -v python3 >/dev/null 2>&1; then
-            print_warning "未能安装 jq，但检测到 python3，改用 python3 解析 JSON。"
-            USE_JQ=false
+        print_warning "未检测到 jq，将安装jp 解析 JSON。"  #"未检测到 jq，将使用 Python 解析 JSON。"
+        sudo apt update > /dev/null 2>&1 && sudo apt install -y jq > /dev/null 2>&1
+       # sudo apt update && sudo apt install -y jq
+        USE_JQ=true
         else
             print_error "无法找到 jq 或 python3，请手动安装。"
             exit 1
