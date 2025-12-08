@@ -591,23 +591,23 @@ configure_postfix() {
     postconf -e "inet_protocols = all"
 
     # NOTE: 队列快速膨胀，消耗磁盘空间（/var/spool/postfix）；若磁盘满，会导致邮件无法写入或服务异常。
-    postconf -e "default_process_limit = 500"
-    #含义：Postfix 允许的最大子进程总数（整体并发上限）。
-    postconf -e "default_destination_concurrency_limit = 500"
-    #含义：对默认目的地允许的并发投递连接数上限（每个目的主机/域）。
-    postconf -e "initial_destination_concurrency = 30"
-    #含义：首次投递时的并发初始值，Postfix 会动态调整
-    postconf -e "smtp_destination_concurrency_limit = 5000"
-    #含义：对每个目的地主机并发发起的投递连接数上限。限制对单个远端的发信并发。
-    postconf -e "smtpd_client_connection_limit = 500"
-    # 含义：单个客户端 IP 可打开的并发 smtpd 连接数上限（防止某个 IP 同时打开大量连接）
+    postconf -e "default_process_limit = 50"
 
+    #含义：Postfix 允许的最大子进程总数（整体并发上限）。 此设置限制您的 Postfix 服务器同时向**任何单个目标域（例如：@gmail.com, @qq.com）**发起投递连接的最大数量为 20 个。
+    postconf -e "default_destination_concurrency_limit = 20"
+    #含义：对默认目的地允许的并发投递连接数上限（每个目的主机/域）。
+    postconf -e "initial_destination_concurrency = 2"
+    #含义：首次投递时的并发初始值，Postfix 会动态调整
+    postconf -e "smtp_destination_concurrency_limit = 50"
+    #含义：对每个目的地主机并发发起的投递连接数上限。限制对单个远端的发信并发。
+    postconf -e "smtpd_client_connection_limit = 50"
+    # 含义：单个客户端 IP 可打开的并发 smtpd 连接数上限（防止某个 IP 同时打开大量连接）
     # NOTE: 这些 backoff/queue 设置在原脚本为 1s（极短），保留但建议在生产中改为合理值
-    postconf -e "smtp_destination_rate_delay = 1s"
+    postconf -e "smtp_destination_rate_delay = 3s"
     #含义：向同一目的地主机连续发送邮件时每连接之间的最小延迟（用于限速）。`1s` 表示每连接间隔 1 秒。
-    postconf -e "minimal_backoff_time = 30s"
-    postconf -e "maximal_backoff_time = 60s"
-    postconf -e "maximal_queue_lifetime = 1000s"
+    postconf -e "minimal_backoff_time = 5m"
+    postconf -e "maximal_backoff_time = 4h"
+    postconf -e "maximal_queue_lifetime = 5d"
 
     ## 本地/虚拟收件与中继
     postconf -e "mydestination = \$myhostname, localhost, \$mydomain, $DOMAIN"
@@ -621,10 +621,12 @@ configure_postfix() {
     postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128 $EXTERNAL_IP/32"
     postconf -e "mailbox_size_limit = 5000000"
     # 限制的是“邮箱总容量”，当本地投递发现超过该值会拒绝/产生 552 这里50MB
-    postconf -e "message_size_limit = 2048576"
-    # 限制单封大小 2MB
+    postconf -e "message_size_limit = 20485760"
+    # 限制单封大小 20MB
+
+
     postconf -e "recipient_delimiter = +"
-    postconf -e "home_mailbox = EmailBox"
+    postconf -e "home_mailbox = Maildir/"
     #原先的  Maildir
 
     # TLS 相关
@@ -637,7 +639,10 @@ configure_postfix() {
     postconf -e "smtp_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1"
     postconf -e "smtpd_tls_security_level = may"
     postconf -e "smtp_tls_security_level = may"
-    postconf -e "smtpd_tls_loglevel = 1"
+    # 增加 SMTPD (接收) 侧的日志详细程度
+    postconf -e "smtpd_tls_loglevel = 2"
+    # 增加 SMTP (发送) 侧的日志详细程度
+    postconf -e "smtp_tls_loglevel = 2"
     postconf -e "smtpd_tls_received_header = yes"
 
     # SASL / Authentication
@@ -649,15 +654,35 @@ configure_postfix() {
 
     # Recipient restrictions (顺序重要)
     postconf -e "smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination, check_policy_service unix:private/policy-spf"
-
-
     postconf -e "header_checks = regexp:/etc/postfix/header_checks"
-
     # Milter
     postconf -e "milter_default_action = accept"
     postconf -e "milter_protocol = 2"
     postconf -e "smtpd_milters = inet:localhost:8891"
     postconf -e "non_smtpd_milters = inet:localhost:8891"
+    # 限制：队列磁盘剩余空间低于 1GB (1073741824 字节) 时，拒绝新邮件。
+    postconf -e "queue_minfree = 1073741824"
+    # 降低 DNS 超时时间，更快地放弃慢速查询
+    postconf -e "resolve_timeout = 5s"
+    # 略微增加 DNS 重试次数，克服瞬时错误
+    postconf -e "resolve_retries = 3"
+    # 缩短 SMTP 连接尝试超时时间，避免投递进程长时间阻塞
+    postconf -e "smtp_connect_timeout = 10s"
+    # 明确硬退信，不要假装是临时错误，避免重试无效地址
+    postconf -e "soft_bounce = no"
+    # 限制邮件在投递前在队列中的最大尝试投递次数# 默认通常很高，设置一个上限避免资源浪费
+    postconf -e "queue_attempts = 1"
+    # 增加内存限制（例如 256MB，如果您的服务器内存充足）
+    postconf -e "message_limit = 268435456"
+
+    # 限制单个客户端 IP 每分钟最多连接 300 次 (每秒 10 次)
+    postconf -e "smtpd_client_connection_rate_limit = 300"
+    # 限制单个客户端 IP 每分钟发送的邮件数量 (例如 3000 封)
+    postconf -e "smtpd_client_message_rate_limit = 3000"
+
+
+
+    #-------------------------------------------------------------------
 
     # header_checks
     cat > /etc/postfix/header_checks <<EOF
@@ -1597,4 +1622,3 @@ main() {
 
 # 启动主菜单
 main
-
