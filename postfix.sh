@@ -185,7 +185,7 @@ print_error() {
 
 show_header() {
     echo -e "${YELLOW}====================================================${NC}"
-    echo -e "${BLUE}🚀 Postfix 邮件服务器管理脚本（修复版）${NC}"
+    echo -e "${BLUE}🚀 Postfix 邮件服务器管理脚本${NC}"
     echo -e "${YELLOW}----------------------------------------------------${NC}"
     echo -e " 域名: ${GREEN}${DOMAIN:-未设置} | IP: ${GREEN}${EXTERNAL_IP:-未设置}${NC}"
     echo -e "${YELLOW}====================================================${NC}"
