@@ -605,9 +605,9 @@ configure_postfix() {
     # NOTE: 这些 backoff/queue 设置在原脚本为 1s（极短），保留但建议在生产中改为合理值
     postconf -e "smtp_destination_rate_delay = 3s"
     #含义：向同一目的地主机连续发送邮件时每连接之间的最小延迟（用于限速）。`1s` 表示每连接间隔 1 秒。
-    postconf -e "minimal_backoff_time = 5m"
-    postconf -e "maximal_backoff_time = 4h"
-    postconf -e "maximal_queue_lifetime = 5d"
+    postconf -e "minimal_backoff_time = 1m"
+    postconf -e "maximal_backoff_time = 5m"
+    postconf -e "maximal_queue_lifetime = 1h"
 
     ## 本地/虚拟收件与中继
     postconf -e "mydestination = \$myhostname, localhost, \$mydomain, $DOMAIN"
