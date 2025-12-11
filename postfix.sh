@@ -624,7 +624,6 @@ configure_postfix() {
     postconf -e "message_size_limit = 20485760"
     # 限制单封大小 20MB
 
-
     postconf -e "recipient_delimiter = +"
     postconf -e "home_mailbox = Maildir/"
     #原先的  Maildir
@@ -677,11 +676,8 @@ configure_postfix() {
 
     # 限制单个客户端 IP 每分钟最多连接 300 次 (每秒 10 次)
     postconf -e "smtpd_client_connection_rate_limit = 300"
-    # 限制单个客户端 IP 每分钟发送的邮件数量 (例如 3000 封)
-    postconf -e "smtpd_client_message_rate_limit = 3000"
-
-
-
+    # 限制单个客户端 IP 每分钟发送的邮件数量 (例如 400 封)
+    postconf -e "smtpd_client_message_rate_limit = 400"
     #-------------------------------------------------------------------
 
     # header_checks
