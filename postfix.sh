@@ -591,7 +591,7 @@ configure_postfix() {
     postconf -e "inet_protocols = all"
 
     # NOTE: 队列快速膨胀，消耗磁盘空间（/var/spool/postfix）；若磁盘满，会导致邮件无法写入或服务异常。
-    postconf -e "default_process_limit = 50"
+    postconf -e "default_process_limit = 100"
 
     #含义：Postfix 允许的最大子进程总数（整体并发上限）。 此设置限制您的 Postfix 服务器同时向**任何单个目标域（例如：@gmail.com, @qq.com）**发起投递连接的最大数量为 20 个。
     postconf -e "default_destination_concurrency_limit = 20"
@@ -607,7 +607,7 @@ configure_postfix() {
     #含义：向同一目的地主机连续发送邮件时每连接之间的最小延迟（用于限速）。`1s` 表示每连接间隔 1 秒。
     postconf -e "minimal_backoff_time = 1m"
     postconf -e "maximal_backoff_time = 5m"
-    postconf -e "maximal_queue_lifetime = 1h"
+    postconf -e "maximal_queue_lifetime = 10m"
 
     ## 本地/虚拟收件与中继
     postconf -e "mydestination = \$myhostname, localhost, \$mydomain, $DOMAIN"
@@ -620,9 +620,12 @@ configure_postfix() {
     #  - 含义：如果设置，为所有外发邮件指定上游 smarthost（例如 ISP 或外部 SMTP 中继）。空表示直接按目标 MX 投递。
     postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128 $EXTERNAL_IP/32"
     postconf -e "mailbox_size_limit = 5000000"
-    # 限制的是“邮箱总容量”，当本地投递发现超过该值会拒绝/产生 552 这里50MB
-    postconf -e "message_size_limit = 20485760"
+    # 限制的是“邮箱总容量”，当本地投递发现超过该值会拒绝/产生 552 这里5MB
+    postconf -e "message_size_limit = 5242880$"
     # 限制单封大小 20MB
+
+    # 立即拒绝投递给本地不存在的用户的邮件
+    postconf -e "unknown_local_recipient_reject_code = 550"
 
     postconf -e "recipient_delimiter = +"
     postconf -e "home_mailbox = Maildir/"
@@ -659,8 +662,8 @@ configure_postfix() {
     postconf -e "milter_protocol = 2"
     postconf -e "smtpd_milters = inet:localhost:8891"
     postconf -e "non_smtpd_milters = inet:localhost:8891"
-    # 限制：队列磁盘剩余空间低于 1GB (1073741824 字节) 时，拒绝新邮件。
-    postconf -e "queue_minfree = 1073741824"
+    # 限制：队列磁盘剩余空间低于 2GB (1073741824 字节) 时，拒绝新邮件。
+    postconf -e "queue_minfree = 2073741824"
     # 降低 DNS 超时时间，更快地放弃慢速查询
     postconf -e "resolve_timeout = 5s"
     # 略微增加 DNS 重试次数，克服瞬时错误
