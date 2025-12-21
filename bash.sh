@@ -11,9 +11,10 @@ echo
 
 # Array of URLs with corresponding descriptions
 urls=(
+    "https://git.io/oneclick  trojan_v2ray脚本"
     "https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh IP质量检测脚本"
     "https://raw.githubusercontent.com/localpoliy/install/local/bbr.sh BBR_脚本"
-    "https://raw.githubusercontent.com/alireza0/s-ui/1.2.2/install.sh S-UI脚本"
+    "https://raw.githubusercontent.com/alireza0/s-ui/master/install.sh S-UI脚本"
     "===================="
     "https://raw.githubusercontent.com/definstall/Definition/local/ssh.sh SSH脚本"
     "https://raw.githubusercontent.com/definstall/Definition/local/fail2ban.sh Fail2ban脚本"
