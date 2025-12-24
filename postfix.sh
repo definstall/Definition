@@ -591,6 +591,7 @@ configure_postfix() {
     postconf -e "inet_protocols = all"
 
     # NOTE: 队列快速膨胀，消耗磁盘空间（/var/spool/postfix）；若磁盘满，会导致邮件无法写入或服务异常。
+    # 设置 Postfix 整体最大同时向外发送邮件的进程数 (默认通常是 100)
     postconf -e "default_process_limit = 100"
 
     #含义：Postfix 允许的最大子进程总数（整体并发上限）。 此设置限制您的 Postfix 服务器同时向**任何单个目标域（例如：@gmail.com, @qq.com）**发起投递连接的最大数量为 20 个。
@@ -598,9 +599,9 @@ configure_postfix() {
     #含义：对默认目的地允许的并发投递连接数上限（每个目的主机/域）。
     postconf -e "initial_destination_concurrency = 2"
     #含义：首次投递时的并发初始值，Postfix 会动态调整
-    postconf -e "smtp_destination_concurrency_limit = 50"
+    postconf -e "smtp_destination_concurrency_limit = 10"
     #含义：对每个目的地主机并发发起的投递连接数上限。限制对单个远端的发信并发。
-    postconf -e "smtpd_client_connection_limit = 50"
+    postconf -e "smtpd_client_connection_limit = 10"
     # 含义：单个客户端 IP 可打开的并发 smtpd 连接数上限（防止某个 IP 同时打开大量连接）
     # NOTE: 这些 backoff/queue 设置在原脚本为 1s（极短），保留但建议在生产中改为合理值
     postconf -e "smtp_destination_rate_delay = 3s"
@@ -608,6 +609,9 @@ configure_postfix() {
     postconf -e "minimal_backoff_time = 1m"
     postconf -e "maximal_backoff_time = 5m"
     postconf -e "maximal_queue_lifetime = 10m"
+    # 减少处理失败后的重试频率，减轻 CPU 和磁盘 I/O 压力
+    postconf -e "queue_run_delay = 10m"
+
 
     ## 本地/虚拟收件与中继
     postconf -e "mydestination = \$myhostname, localhost, \$mydomain, $DOMAIN"
@@ -621,7 +625,7 @@ configure_postfix() {
     postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128 $EXTERNAL_IP/32"
     postconf -e "mailbox_size_limit = 5000000"
     # 限制的是“邮箱总容量”，当本地投递发现超过该值会拒绝/产生 552 这里5MB
-    postconf -e "message_size_limit = 5242880$"
+    postconf -e "message_size_limit = 5242880"
     # 限制单封大小 20MB
 
     # 立即拒绝投递给本地不存在的用户的邮件
@@ -641,6 +645,7 @@ configure_postfix() {
     postconf -e "smtp_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1"
     postconf -e "smtpd_tls_security_level = may"
     postconf -e "smtp_tls_security_level = may"
+
     # 增加 SMTPD (接收) 侧的日志详细程度
     postconf -e "smtpd_tls_loglevel = 2"
     # 增加 SMTP (发送) 侧的日志详细程度
@@ -662,8 +667,9 @@ configure_postfix() {
     postconf -e "milter_protocol = 2"
     postconf -e "smtpd_milters = inet:localhost:8891"
     postconf -e "non_smtpd_milters = inet:localhost:8891"
-    # 限制：队列磁盘剩余空间低于 2GB (1073741824 字节) 时，拒绝新邮件。
-    postconf -e "queue_minfree = 2073741824"
+
+    # 限制：队列磁盘剩余空间低于 1GB (1073741824 字节) 时，拒绝新邮件。
+    postconf -e "queue_minfree = 1073741824"
     # 降低 DNS 超时时间，更快地放弃慢速查询
     postconf -e "resolve_timeout = 5s"
     # 略微增加 DNS 重试次数，克服瞬时错误
@@ -682,6 +688,16 @@ configure_postfix() {
     # 限制单个客户端 IP 每分钟发送的邮件数量 (例如 400 封)
     postconf -e "smtpd_client_message_rate_limit = 400"
     #-------------------------------------------------------------------
+
+    # 不发送关于投递失败的退信通知给发件人（慎用，但在大流量发信场景可防爆）
+    postconf -e "notify_classes ="
+    postconf -e "bounce_template_file ="
+    # 限制单份退信的大小
+    postconf -e "bounce_size_limit = 5"
+
+
+  #-------------------------------------------------------------------
+
 
     # header_checks
     cat > /etc/postfix/header_checks <<EOF
@@ -725,6 +741,56 @@ MASTER_EOF
 
     print_status "Postfix main.cf 与 master.cf 配置已完成。"
 }
+
+
+configure_logrotate() {
+    print_status "配置 Logrotate 以防止磁盘爆满..."
+
+    # 1. 你原有的 Postfix 专用日志滚动
+    cat > /etc/logrotate.d/postfix-custom <<EOF
+/var/log/mail.log
+{
+    rotate 1
+    daily
+    maxsize 10M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    sharedscripts
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate || true
+    endscript
+}
+EOF
+
+    # 2. 新增：系统核心日志滚动（防止 syslog/auth.log 爆满）
+    # 我们直接覆盖或新建 rsyslog 的滚动规则
+    cat > /etc/logrotate.d/rsyslog <<EOF
+/var/log/syslog
+/var/log/auth.log
+/var/log/messages
+/var/log/mail.info
+/var/log/mail.warn
+/var/log/mail.err
+{
+    rotate 2
+    daily
+    maxsize 50M
+    missingok
+    notifempty
+    compress
+    postrotate
+        /usr/lib/rsyslog/rsyslog-rotate || true
+    endscript
+}
+EOF
+
+    # 立即强制执行一次，确保规则生效
+    logrotate -f /etc/logrotate.d/rsyslog || true
+    print_status "Logrotate 配置完成。"
+}
+
 
 configure_policyd() {
     print_status "正在配置 Postfix Policyd (postfix-policyd-spf-python)..."
@@ -1004,6 +1070,10 @@ net.ipv4.ip_forward = 1">>/etc/sysctl.conf
 install_postfix() {
     # 修复：确保在开始安装前检查并修复 dpkg 状态
     check_system
+
+    # 修改logo级别 系统核心日志滚动（防止 syslog/auth.log 爆满）
+    configure_logrotate
+
 
     if dpkg -s postfix >/dev/null 2>&1; then
         print_status "Postfix 已安装。"
