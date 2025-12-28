@@ -599,22 +599,22 @@ configure_postfix() {
     #含义：对默认目的地允许的并发投递连接数上限（每个目的主机/域）。
     postconf -e "initial_destination_concurrency = 2"
     #含义：首次投递时的并发初始值，Postfix 会动态调整
-    postconf -e "smtp_destination_concurrency_limit = 10"
+    postconf -e "smtp_destination_concurrency_limit = 20"
     #含义：对每个目的地主机并发发起的投递连接数上限。限制对单个远端的发信并发。
-    postconf -e "smtpd_client_connection_limit = 10"
+    # postconf -e "smtpd_client_connection_limit = 10"
     # 含义：单个客户端 IP 可打开的并发 smtpd 连接数上限（防止某个 IP 同时打开大量连接）
     # NOTE: 这些 backoff/queue 设置在原脚本为 1s（极短），保留但建议在生产中改为合理值
-    postconf -e "smtp_destination_rate_delay = 3s"
-    #含义：向同一目的地主机连续发送邮件时每连接之间的最小延迟（用于限速）。`1s` 表示每连接间隔 1 秒。
-    postconf -e "minimal_backoff_time = 1m"
-    postconf -e "maximal_backoff_time = 5m"
-    postconf -e "maximal_queue_lifetime = 10m"
-    # 减少处理失败后的重试频率，减轻 CPU 和磁盘 I/O 压力
+    postconf -e "smtp_destination_rate_delay = 0"
+    #含义：向同一目的地主机连续发送邮件时每连接之间的最小延迟（用于限速）。`1s` 表示每连接间隔 1 秒。  0 mei
+    postconf -e "minimal_backoff_time = 10m"
+    postconf -e "maximal_queue_lifetime = 30m"
+    # 减少处理失败后的重试频率，减轻 CPU 和磁盘 I/O 压力 # 队列运行扫描的间隔（每 10 分钟扫描一次队列看谁需要重试）
     postconf -e "queue_run_delay = 10m"
-
+    # 修改单个 IP 的最大并发连接数（例如设为 20）
+    postconf -e "smtpd_client_connection_count_limit = 200000"
 
     ## 本地/虚拟收件与中继
-    postconf -e "mydestination = \$myhostname, localhost, \$mydomain, $DOMAIN"
+    postconf -e "mydestination = \$myhostname, localhost, localhost.localdomain"
     postconf -e "local_recipient_maps = unix:passwd.byname \$virtual_alias_maps"
     postconf -e "virtual_alias_domains = $DOMAIN"
     postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual"
@@ -626,7 +626,7 @@ configure_postfix() {
     postconf -e "mailbox_size_limit = 5000000"
     # 限制的是“邮箱总容量”，当本地投递发现超过该值会拒绝/产生 552 这里5MB
     postconf -e "message_size_limit = 5242880"
-    # 限制单封大小 20MB
+    # 限制单封大小 5MB
 
     # 立即拒绝投递给本地不存在的用户的邮件
     postconf -e "unknown_local_recipient_reject_code = 550"
@@ -636,7 +636,7 @@ configure_postfix() {
     #原先的  Maildir
 
     # TLS 相关
-    postconf -e "smtpd_use_tls = yes"
+    # postconf -e "smtpd_use_tls = yes"
     postconf -e "smtpd_tls_cert_file = $CERT_FILE"
     postconf -e "smtpd_tls_key_file = $KEY_FILE"
 
@@ -671,25 +671,31 @@ configure_postfix() {
     # 限制：队列磁盘剩余空间低于 1GB (1073741824 字节) 时，拒绝新邮件。
     postconf -e "queue_minfree = 1073741824"
     # 降低 DNS 超时时间，更快地放弃慢速查询
-    postconf -e "resolve_timeout = 5s"
+    # postconf -e "resolve_timeout = 5s"
     # 略微增加 DNS 重试次数，克服瞬时错误
-    postconf -e "resolve_retries = 3"
+    # postconf -e "resolve_retries = 3"
     # 缩短 SMTP 连接尝试超时时间，避免投递进程长时间阻塞
     postconf -e "smtp_connect_timeout = 10s"
     # 明确硬退信，不要假装是临时错误，避免重试无效地址
     postconf -e "soft_bounce = no"
     # 限制邮件在投递前在队列中的最大尝试投递次数# 默认通常很高，设置一个上限避免资源浪费
-    postconf -e "queue_attempts = 1"
+    # postconf -e "queue_attempts = 1"
     # 增加内存限制（例如 256MB，如果您的服务器内存充足）
-    postconf -e "message_limit = 268435456"
+    # postconf -e "message_limit = 268435456"
 
-    # 限制单个客户端 IP 每分钟最多连接 300 次 (每秒 10 次)
-    postconf -e "smtpd_client_connection_rate_limit = 3000"
     # 限制单个客户端 IP 每分钟发送的邮件数量 (例如 400 封)
-    postconf -e "smtpd_client_message_rate_limit = 4000"
+    postconf -e "smtpd_client_message_rate_limit = 10000"
     # (可选) 修改单个 IP 在一小段时间内的连接频率  # 限制每分钟的连接频率（可选，如果不希望限制则设为 0）
     postconf -e "smtpd_client_connection_rate_limit = 0"
+    # 如果退信通知 1 小时内发不回给发件人，直接从队列删除
+    postconf -e "bounce_queue_lifetime = 1h"
+
     #-------------------------------------------------------------------
+
+    # 限制队列管理器同时处理的消息数量（默认通常是 20000）
+    # 如果你的服务器内存小，调小这个值可以防止系统卡死
+    postconf -e "qmgr_message_active_limit = 10000"
+    postconf -e "qmgr_message_recipient_limit = 10000"
 
     # 不发送关于投递失败的退信通知给发件人（慎用，但在大流量发信场景可防爆）
     postconf -e "notify_classes ="
@@ -697,6 +703,10 @@ configure_postfix() {
     # 限制单份退信的大小
     postconf -e "bounce_size_limit = 5"
 
+
+
+
+    # postconf -X "queue_attempts" "smtpd_client_connection_limit" "message_limit" "resolve_retries" "resolve_timeout" "smtpd_use_tls"
 
   #-------------------------------------------------------------------
 
