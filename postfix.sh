@@ -684,9 +684,11 @@ configure_postfix() {
     postconf -e "message_limit = 268435456"
 
     # 限制单个客户端 IP 每分钟最多连接 300 次 (每秒 10 次)
-    postconf -e "smtpd_client_connection_rate_limit = 300"
+    postconf -e "smtpd_client_connection_rate_limit = 3000"
     # 限制单个客户端 IP 每分钟发送的邮件数量 (例如 400 封)
-    postconf -e "smtpd_client_message_rate_limit = 400"
+    postconf -e "smtpd_client_message_rate_limit = 4000"
+    # (可选) 修改单个 IP 在一小段时间内的连接频率  # 限制每分钟的连接频率（可选，如果不希望限制则设为 0）
+    postconf -e "smtpd_client_connection_rate_limit = 0"
     #-------------------------------------------------------------------
 
     # 不发送关于投递失败的退信通知给发件人（慎用，但在大流量发信场景可防爆）
