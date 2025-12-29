@@ -595,11 +595,11 @@ configure_postfix() {
     postconf -e "default_process_limit = 100"
 
     #含义：Postfix 允许的最大子进程总数（整体并发上限）。 此设置限制您的 Postfix 服务器同时向**任何单个目标域（例如：@gmail.com, @qq.com）**发起投递连接的最大数量为 20 个。
-    postconf -e "default_destination_concurrency_limit = 20"
+    postconf -e "default_destination_concurrency_limit = 50"
     #含义：对默认目的地允许的并发投递连接数上限（每个目的主机/域）。
-    postconf -e "initial_destination_concurrency = 2"
+    postconf -e "initial_destination_concurrency = 10"
     #含义：首次投递时的并发初始值，Postfix 会动态调整
-    postconf -e "smtp_destination_concurrency_limit = 20"
+    postconf -e "smtp_destination_concurrency_limit = 50"
     #含义：对每个目的地主机并发发起的投递连接数上限。限制对单个远端的发信并发。
     # postconf -e "smtpd_client_connection_limit = 10"
     # 含义：单个客户端 IP 可打开的并发 smtpd 连接数上限（防止某个 IP 同时打开大量连接）
@@ -609,7 +609,7 @@ configure_postfix() {
     postconf -e "minimal_backoff_time = 10m"
     postconf -e "maximal_queue_lifetime = 30m"
     # 减少处理失败后的重试频率，减轻 CPU 和磁盘 I/O 压力 # 队列运行扫描的间隔（每 10 分钟扫描一次队列看谁需要重试）
-    postconf -e "queue_run_delay = 10m"
+    postconf -e "queue_run_delay = 1m"
     # 修改单个 IP 的最大并发连接数（例如设为 20）
     postconf -e "smtpd_client_connection_count_limit = 200000"
 
@@ -623,7 +623,7 @@ configure_postfix() {
     postconf -e "relayhost ="
     #  - 含义：如果设置，为所有外发邮件指定上游 smarthost（例如 ISP 或外部 SMTP 中继）。空表示直接按目标 MX 投递。
     postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128 $EXTERNAL_IP/32"
-    postconf -e "mailbox_size_limit = 5000000"
+    postconf -e "mailbox_size_limit = 0"
     # 限制的是“邮箱总容量”，当本地投递发现超过该值会拒绝/产生 552 这里5MB
     postconf -e "message_size_limit = 5242880"
     # 限制单封大小 5MB
@@ -689,13 +689,16 @@ configure_postfix() {
     postconf -e "smtpd_client_connection_rate_limit = 0"
     # 如果退信通知 1 小时内发不回给发件人，直接从队列删除
     postconf -e "bounce_queue_lifetime = 1h"
-
+    # 或者增加 Milter 的超时时间，防止它卡住 cleanup
+    postconf -e "milter_content_timeout = 2s"
+    # 限制 header 检查的数量，防止 cleanup 扫描过大的邮件头
+    postconf -e "header_size_limit = 102400"
     #-------------------------------------------------------------------
 
     # 限制队列管理器同时处理的消息数量（默认通常是 20000）
     # 如果你的服务器内存小，调小这个值可以防止系统卡死
-    postconf -e "qmgr_message_active_limit = 10000"
-    postconf -e "qmgr_message_recipient_limit = 10000"
+    postconf -e "qmgr_message_active_limit = 20000"
+    postconf -e "qmgr_message_recipient_limit = 20000"
 
     # 不发送关于投递失败的退信通知给发件人（慎用，但在大流量发信场景可防爆）
     postconf -e "notify_classes ="
