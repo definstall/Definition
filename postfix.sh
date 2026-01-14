@@ -313,15 +313,30 @@ PY
 
 # 获取外网 IP
 get_external_ip() {
-    print_status "正在获取外网 IP 地址..."
-    EXTERNAL_IP=$(curl -s ifconfig.me || curl -s ipinfo.io/ip || echo "")
+    print_status "正在获取外网 IPv4 地址..."
+
+    # 1. 尝试通过外部 API 获取 (强制使用 IPv4 协议 -4)
+    # 使用 -4 参数强制 curl 使用 IPv4 访问 API
+    EXTERNAL_IP=$(curl -4 -s --max-time 5 ifconfig.me || curl -4 -s --max-time 5 ipinfo.io/ip || echo "")
+
+    # 2. 如果外部 API 失败，从本地网卡 eth0 提取
     if [ -z "$EXTERNAL_IP" ]; then
-        print_error "无法获取外网 IP 地址"
+        print_warning "外部 API 获取失败，尝试从本地网卡提取 IPv4..."
+        # 仅匹配标准的 IPv4 格式
+        EXTERNAL_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
+    fi
+
+    # 3. 最终检查格式是否为有效的 IPv4
+    if [[ ! "$EXTERNAL_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        print_error "获取到的 IP [$EXTERNAL_IP] 不是有效的 IPv4 地址。"
+        print_error "Cloudflare A 记录不支持 IPv6，请检查网络设置。"
         exit 1
     fi
+
+    print_status "成功获取 IPv4 地址: $EXTERNAL_IP"
     validate_variable "EXTERNAL_IP" "$EXTERNAL_IP"
-    print_status "外网 IP：$EXTERNAL_IP" true
 }
+
 
 # 获取 Cloudflare Zone ID（保留你原逻辑，使用 cloudflare_api）
 get_zone_id() {
@@ -611,7 +626,7 @@ configure_postfix() {
     # 减少处理失败后的重试频率，减轻 CPU 和磁盘 I/O 压力 # 队列运行扫描的间隔（每 10 分钟扫描一次队列看谁需要重试）
     postconf -e "queue_run_delay = 1m"
     # 修改单个 IP 的最大并发连接数（例如设为 20）
-    postconf -e "smtpd_client_connection_count_limit = 200000"
+    postconf -e "smtpd_client_connection_count_limit = 100"
 
     ## 本地/虚拟收件与中继
     postconf -e "mydestination = \$myhostname, localhost, localhost.localdomain"
@@ -646,10 +661,10 @@ configure_postfix() {
     postconf -e "smtpd_tls_security_level = may"
     postconf -e "smtp_tls_security_level = may"
 
-    # 增加 SMTPD (接收) 侧的日志详细程度
-    postconf -e "smtpd_tls_loglevel = 2"
+    # 增加 SMTPD (接收) 侧的日志详细程度 # 将 2 改为 0 或 1 (0 表示不记录 TLS 握手细节，1 表示只记录基本信息)
+    postconf -e "smtpd_tls_loglevel = 0"
     # 增加 SMTP (发送) 侧的日志详细程度
-    postconf -e "smtp_tls_loglevel = 2"
+    postconf -e "smtp_tls_loglevel = 0"
     postconf -e "smtpd_tls_received_header = yes"
 
     # SASL / Authentication
@@ -668,8 +683,8 @@ configure_postfix() {
     postconf -e "smtpd_milters = inet:localhost:8891"
     postconf -e "non_smtpd_milters = inet:localhost:8891"
 
-    # 限制：队列磁盘剩余空间低于 1GB (1073741824 字节) 时，拒绝新邮件。
-    postconf -e "queue_minfree = 1073741824"
+    # 限制：队列磁盘剩余空间低于 200MB (209715200 字节) 时，拒绝新邮件。
+    postconf -e "queue_minfree = 209715200"
     # 降低 DNS 超时时间，更快地放弃慢速查询
     # postconf -e "resolve_timeout = 5s"
     # 略微增加 DNS 重试次数，克服瞬时错误
@@ -706,13 +721,7 @@ configure_postfix() {
     # 限制单份退信的大小
     postconf -e "bounce_size_limit = 5"
 
-
-
-
     # postconf -X "queue_attempts" "smtpd_client_connection_limit" "message_limit" "resolve_retries" "resolve_timeout" "smtpd_use_tls"
-
-  #-------------------------------------------------------------------
-
 
     # header_checks
     cat > /etc/postfix/header_checks <<EOF
@@ -1042,6 +1051,9 @@ EOF
 }
 
 optimizing_system(){
+    #添加定时清理功能
+    setup_cron_maintenance
+
     print_status "正在配置系统参数以进行网络和文件句柄优化..."
     # (略) 保留原脚本的 sysctl/limits 修改逻辑（如需可启用）
 	sed -i '/fs.file-max/d' /etc/sysctl.conf
@@ -1081,6 +1093,49 @@ net.ipv4.ip_forward = 1">>/etc/sysctl.conf
 	echo "ulimit -SHn 1000000">>/etc/profile
     print_status "系统优化函数已加载，如需启用请在脚本中调用。"
 }
+
+
+# 新增：配置定时清理任务
+setup_cron_maintenance() {
+    print_status "正在配置每小时自动清理日志的定时任务..."
+
+    local maintenance_script="/usr/local/bin/postfix_maintenance.sh"
+
+    # 1. 创建维护脚本内容
+    cat > "$maintenance_script" <<'EOF'
+#!/bin/bash
+# Postfix 维护脚本：清理日志并释放磁盘空间
+
+# 清空文本邮件日志
+LOG_FILE="/var/log/mail.log"
+if [ -f "$LOG_FILE" ]; then
+    cat /dev/null > "$LOG_FILE"
+    cat /dev/null > /var/log/syslog
+fi
+
+# 清理 systemd 二进制日志 (只保留最近 1 小时)
+journalctl --vacuum-size=100M
+
+# 重启服务以释放文件句柄并应用状态
+systemctl restart postfix
+systemctl restart systemd-journald
+
+echo "[$(date)] Postfix logs cleaned and services restarted." >> /var/log/postfix_maintenance.log
+EOF
+
+    # 2. 赋予执行权限
+    chmod +x "$maintenance_script"
+
+    # 3. 写入 crontab (每小时执行一次)
+    # 检查是否已经存在该任务，避免重复添加
+    if ! crontab -l 2>/dev/null | grep -q "$maintenance_script"; then
+        (crontab -l 2>/dev/null; echo "0 * * * * $maintenance_script") | crontab -
+        print_status "定时任务已添加：每小时运行一次。" true
+    else
+        print_status "定时任务已存在，跳过添加。" true
+    fi
+}
+
 
 install_postfix() {
     # 修复：确保在开始安装前检查并修复 dpkg 状态
@@ -1680,6 +1735,9 @@ log_management_menu() {
         esac
     done
 }
+
+
+
 
 main() {
     init_logs
