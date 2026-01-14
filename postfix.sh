@@ -316,13 +316,13 @@ get_external_ip() {
     print_status "正在获取外网 IPv4 地址..."
 
     # 1. 尝试通过外部 API 获取 (强制使用 IPv4 协议 -4)
-    # 使用 -4 参数强制 curl 使用 IPv4 访问 API
+    # 使用 -4 参数强制 curl 使用 IPv4 访问 API，避免在双栈环境下优先尝试 IPv6 导致超时或获取错误
     EXTERNAL_IP=$(curl -4 -s --max-time 5 ifconfig.me || curl -4 -s --max-time 5 ipinfo.io/ip || echo "")
 
-    # 2. 如果外部 API 失败，从本地网卡 eth0 提取
+    # 2. 如果外部 API 失败，从本地网卡提取
     if [ -z "$EXTERNAL_IP" ]; then
         print_warning "外部 API 获取失败，尝试从本地网卡提取 IPv4..."
-        # 仅匹配标准的 IPv4 格式
+        # 显式指定 -4 仅查看 IPv4 地址，并过滤掉回环地址 127.0.0.1
         EXTERNAL_IP=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -n1)
     fi
 
@@ -603,7 +603,7 @@ configure_postfix() {
     postconf -e "mydomain = $DOMAIN"
     postconf -e "myorigin = \$mydomain"
     postconf -e "inet_interfaces = all"
-    postconf -e "inet_protocols = all"
+    postconf -e "inet_protocols = ipv4"
 
     # NOTE: 队列快速膨胀，消耗磁盘空间（/var/spool/postfix）；若磁盘满，会导致邮件无法写入或服务异常。
     # 设置 Postfix 整体最大同时向外发送邮件的进程数 (默认通常是 100)
@@ -637,7 +637,7 @@ configure_postfix() {
     #  - 含义：Postfix 接受并转发（中继）的域列表。为空表示不对外中继，这是常见且安全的设置（避免开放中继）。
     postconf -e "relayhost ="
     #  - 含义：如果设置，为所有外发邮件指定上游 smarthost（例如 ISP 或外部 SMTP 中继）。空表示直接按目标 MX 投递。
-    postconf -e "mynetworks = 127.0.0.0/8 [::ffff:127.0.0.0]/104 [::1]/128 $EXTERNAL_IP/32"
+    postconf -e "mynetworks = 127.0.0.0/8 $EXTERNAL_IP/32"
     postconf -e "mailbox_size_limit = 0"
     # 限制的是“邮箱总容量”，当本地投递发现超过该值会拒绝/产生 552 这里5MB
     postconf -e "message_size_limit = 5242880"
