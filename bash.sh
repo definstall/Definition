@@ -22,7 +22,7 @@ urls=(
     "https://raw.githubusercontent.com/definstall/Definition/local/frp.sh Frp内网-穿透"
     "===================="
     "https://raw.githubusercontent.com/definstall/Definition/local/nginx.sh Nginx_脚本"
-    "https://raw.githubusercontent.com/definstall/Definition/local/xrdps.sh Kubuntu桌面"
+    "https://raw.githubusercontent.com/definstall/Definition/local/xrdps.sh Ubuntu升级/桌面"
     "https://raw.githubusercontent.com/definstall/Definition/local/docker.sh Docker_脚本"
     "===================="
     "https://raw.githubusercontent.com/definstall/ssh_tool/main/ssh_tool.sh -o ssh_tool.sh Tools脚本"
